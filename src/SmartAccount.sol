@@ -16,7 +16,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @author Livingstone zion
  * @notice This is the initial account model deployed by the Account Factory
  */
-contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
+contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////
                                  TYPES
     //////////////////////////////////////////////////////////////*/
@@ -35,8 +35,6 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event TaskManagerLinked(address indexed taskManager);
-    event TaskManagerUnlinked();
     event TaskCreated(uint256 indexed taskId, string description, uint256 rewardAmount);
     event TaskCompleted(uint256 indexed taskId);
     event TaskCanceled(uint256 indexed taskId);
@@ -50,24 +48,32 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error SimpleAccount__OnlyOwnerCanCall();
-    error SimpleAccount__NotFromEntryPoint();
-    error SimpleAccount__ExecutionFailed(bytes result);
-    error SimpleAccount__TaskManagerAlreadyDeployed();
-    error SimpleAccount__AddMoreFunds();
-    error SimpleAccount__TaskCreationFailed();
-    error SimpleAccount__TaskRewardPaymentFailed();
-    error SimpleAccount__OnlyTaskManagerCanCall();
-    error SimpleAccount__PenaltyDurationNotElapsed();
-    error SimpleAccount__PenaltyTypeMismatch();
-    error SimpleAccount__PayPrefundFailed();
-    error SimpleAccount__UnlinkCurrentTaskManager();
-    error SimpleAccount__PickAPenalty();
-    error SimpleAccount__InvalidPenaltyChoice();
-    error SimpleAccount__TaskManagerNotLinked();
-    error SimpleAccount__NoTaskManagerLinked();
-    error SimpleAccount__CannotWithdrawCommittedRewards();
-    error SimpleAccount__TransferFailed();
+    error SmartAccount__OnlyOwnerCanCall();
+    error SmartAccount__NotFromEntryPoint();
+    error SmartAccount__ExecutionFailed(bytes result);
+    error SmartAccount__TaskManagerAlreadyDeployed();
+    error SmartAccount__AddMoreFunds();
+    error SmartAccount__TaskCreationFailed();
+    error SmartAccount__TaskRewardPaymentFailed();
+    error SmartAccount__OnlyTaskManagerCanCall();
+    error SmartAccount__PenaltyDurationNotElapsed();
+    error SmartAccount__PenaltyTypeMismatch();
+    error SmartAccount__PayPrefundFailed();
+    error SmartAccount__UnlinkCurrentTaskManager();
+    error SmartAccount__PickAPenalty();
+    error SmartAccount__InvalidPenaltyChoice();
+    error SmartAccount__TaskManagerNotLinked();
+    error SmartAccount__NoTaskManagerLinked();
+    error SmartAccount__CannotWithdrawCommittedRewards();
+    error SmartAccount__TransferFailed();
+    error SmartAccount__TaskNotExpired();
+    error SmartAccount__InsufficientCommittedReward();
+    error SmartAccount__PaymentAlreadyReleased();
+    error SmartAccount__TaskAlreadyCompleted();
+    error SmartAccount__CannotTransferZero();
+    error SmartAccount__InvalidPenaltyConfig();
+    error SmartAccount__RewardCannotBeZero();
+    error SmartAccount__TaskAlreadyCanceled();
     /*//////////////////////////////////////////////////////////////
                                INITIALIZER
     //////////////////////////////////////////////////////////////*/
@@ -84,28 +90,28 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
 
     modifier requireFromEntryPoint() {
         if (msg.sender != address(i_entryPoint)) {
-            revert SimpleAccount__NotFromEntryPoint();
+            revert SmartAccount__NotFromEntryPoint();
         }
         _;
     }
 
     modifier onlyOwner() {
         if (msg.sender != s_owner) {
-            revert SimpleAccount__OnlyOwnerCanCall();
+            revert SmartAccount__OnlyOwnerCanCall();
         }
         _;
     }
 
     modifier contractFundedForTasks(uint256 rewardAmount) {
         if (address(this).balance < s_totalCommittedReward + rewardAmount) {
-            revert SimpleAccount__AddMoreFunds();
+            revert SmartAccount__AddMoreFunds();
         }
         _;
     }
 
     modifier taskManagerLinked() {
         if (address(taskManager) == address(0)) {
-            revert SimpleAccount__NoTaskManagerLinked();
+            revert SmartAccount__NoTaskManagerLinked();
         }
         _;
     }
@@ -115,21 +121,27 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
     //////////////////////////////////////////////////////////////*/
     receive() external payable {}
 
-    function execute(address dest, uint256 value, bytes calldata functionData) external nonReentrant {
+    function execute(address dest, uint256 value, bytes calldata functionData)
+        external
+        requireFromEntryPoint
+        nonReentrant
+    {
         (bool success, bytes memory result) = dest.call{value: value}(functionData);
         if (!success) {
-            revert SimpleAccount__ExecutionFailed(result);
+            revert SmartAccount__ExecutionFailed(result);
         }
     }
 
     function transfer(address destination, uint256 value) external nonReentrant onlyOwner {
-        if (value == 0) return;
+        if (value == 0) {
+            revert SmartAccount__CannotTransferZero();
+        }
         if (value > (address(this).balance - s_totalCommittedReward)) {
-            revert SimpleAccount__CannotWithdrawCommittedRewards();
+            revert SmartAccount__CannotWithdrawCommittedRewards();
         }
         (bool success,) = destination.call{value: value}("");
         if (!success) {
-            revert SimpleAccount__TransferFailed();
+            revert SmartAccount__TransferFailed();
         }
         emit Transferred(destination, value);
     }
@@ -160,11 +172,11 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
         }
     }
 
-    function _payPrefund(uint256 missingAccountFunds) internal nonReentrant {
+    function _payPrefund(uint256 missingAccountFunds) internal {
         if (missingAccountFunds != 0) {
             (bool success,) = payable(address(i_entryPoint)).call{value: missingAccountFunds}("");
             if (!success) {
-                revert SimpleAccount__PayPrefundFailed();
+                revert SmartAccount__PayPrefundFailed();
             }
         }
     }
@@ -183,22 +195,30 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
     function createTask(
         string calldata description,
         uint256 rewardAmount,
-        uint256 durationInSeconds,
+        uint256 deadlineInSeconds,
         uint8 choice,
         address buddy,
         uint256 delayDuration
     ) external onlyOwner taskManagerLinked contractFundedForTasks(rewardAmount) {
         if (choice == 0) {
-            revert SimpleAccount__PickAPenalty();
+            revert SmartAccount__PickAPenalty();
         }
         if (choice > 2) {
-            revert SimpleAccount__InvalidPenaltyChoice();
+            revert SmartAccount__InvalidPenaltyChoice();
         }
-
+        if (choice == PENALTY_SENDBUDDY && buddy == address(0)) {
+            revert SmartAccount__InvalidPenaltyConfig();
+        }
+        if (choice == PENALTY_DELAYEDPAYMENT && delayDuration == 0) {
+            revert SmartAccount__InvalidPenaltyConfig();
+        }
+        if (rewardAmount == 0) {
+            revert SmartAccount__RewardCannotBeZero();
+        }
         (uint256 taskId, bool valid) =
-            taskManager.createTask(description, rewardAmount, durationInSeconds, choice, delayDuration, buddy);
+            taskManager.createTask(description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy);
         if (!valid) {
-            revert SimpleAccount__TaskCreationFailed();
+            revert SmartAccount__TaskCreationFailed();
         }
 
         s_totalCommittedReward += rewardAmount;
@@ -207,13 +227,16 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
 
     function completeTask(uint256 taskId) external onlyOwner taskManagerLinked nonReentrant {
         TaskManager.Task memory task = taskManager.getTask(taskId);
+        if (task.status == TaskManager.TaskStatus.COMPLETED) {
+            revert SmartAccount__TaskAlreadyCompleted();
+        }
         taskManager.completeTask(taskId);
 
         if (task.rewardAmount > 0) {
             s_totalCommittedReward -= task.rewardAmount;
-            (bool success,) = payable(address(this)).call{value: task.rewardAmount}("");
+            (bool success,) = payable(msg.sender).call{value: task.rewardAmount}("");
             if (!success) {
-                revert SimpleAccount__TaskRewardPaymentFailed();
+                revert SmartAccount__TaskRewardPaymentFailed();
             }
         }
 
@@ -222,43 +245,23 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
 
     function cancelTask(uint256 taskId) external onlyOwner taskManagerLinked {
         TaskManager.Task memory task = taskManager.getTask(taskId);
+        if (task.status == TaskManager.TaskStatus.CANCELED) {
+            revert SmartAccount__TaskAlreadyCanceled();
+        }
         taskManager.cancelTask(taskId);
         s_totalCommittedReward -= task.rewardAmount;
         emit TaskCanceled(taskId);
     }
 
-    function getSumOfActiveTasksRewards() external view taskManagerLinked returns (uint256 totalTaskRewards) {
-        uint256 taskNo = taskManager.getTotalTasks();
-
-        for (uint256 i = 0; i < taskNo; i++) {
-            // Check if task exists before getting it
-            if (taskManager.isValidTask(i)) {
-                TaskManager.Task memory task = taskManager.getTask(i);
-                if (task.status == TaskManager.TaskStatus.PENDING) {
-                    totalTaskRewards += task.rewardAmount;
-                }
-            }
-        }
-    }
-
-    function getTask(uint256 taskId) external view returns (TaskManager.Task memory) {
-        if (address(taskManager) == address(0)) {
-            revert SimpleAccount__NoTaskManagerLinked();
-        }
+    function getTask(uint256 taskId) external view taskManagerLinked returns (TaskManager.Task memory) {
         return taskManager.getTask(taskId);
     }
 
-    function getTotalTasks() external view returns (uint256) {
-        if (address(taskManager) == address(0)) {
-            revert SimpleAccount__NoTaskManagerLinked();
-        }
+    function getTotalTasks() external view taskManagerLinked returns (uint256) {
         return taskManager.getTotalTasks();
     }
 
-    function getAllTasks() external view returns (TaskManager.Task[] memory) {
-        if (address(taskManager) == address(0)) {
-            revert SimpleAccount__NoTaskManagerLinked();
-        }
+    function getAllTasks() external view taskManagerLinked returns (TaskManager.Task[] memory) {
         return taskManager.getAllTasks();
     }
 
@@ -268,44 +271,67 @@ contract SimpleAccount is Initializable, IAccount, ReentrancyGuard {
 
     function expiredTaskCallback(uint256 taskId) external nonReentrant {
         if (msg.sender != address(taskManager)) {
-            revert SimpleAccount__OnlyTaskManagerCanCall();
+            revert SmartAccount__OnlyTaskManagerCanCall();
         }
-        TaskManager taskMgr = TaskManager(msg.sender);
-        TaskManager.Task memory task = taskMgr.getTask(taskId);
+
+        TaskManager.Task memory task = taskManager.getTask(taskId);
+
+        if (task.status != TaskManager.TaskStatus.EXPIRED) {
+            revert SmartAccount__TaskNotExpired();
+        }
 
         if (task.choice == PENALTY_DELAYEDPAYMENT) {
             emit DurationPenaltyApplied(taskId, task.deadline + task.delayDuration);
         } else if (task.choice == PENALTY_SENDBUDDY) {
             if (task.buddy == address(0)) {
-                revert SimpleAccount__PickAPenalty();
+                revert SmartAccount__PickAPenalty();
             }
+
             s_totalCommittedReward -= task.rewardAmount;
             (bool success,) = payable(task.buddy).call{value: task.rewardAmount}("");
             if (!success) {
-                revert SimpleAccount__TaskRewardPaymentFailed();
+                revert SmartAccount__TaskRewardPaymentFailed();
             }
             emit PenaltyFundsReleasedToBuddy(taskId, task.rewardAmount, task.buddy);
         } else {
-            revert SimpleAccount__InvalidPenaltyChoice();
+            revert SmartAccount__InvalidPenaltyChoice();
         }
 
         emit TaskExpired(taskId);
     }
 
+    function expireTask(uint256 taskId) external onlyOwner taskManagerLinked {
+        taskManager.expireTask(taskId);
+        emit TaskExpired(taskId);
+    }
+
     function releaseDelayedPayment(uint256 taskId) external onlyOwner taskManagerLinked nonReentrant {
         TaskManager.Task memory task = taskManager.getTask(taskId);
-
         if (task.choice != PENALTY_DELAYEDPAYMENT) {
-            revert SimpleAccount__PenaltyTypeMismatch();
+            revert SmartAccount__PenaltyTypeMismatch();
         }
-        if (block.timestamp < task.deadline + task.delayDuration) {
-            revert SimpleAccount__PenaltyDurationNotElapsed();
+        if (task.status != TaskManager.TaskStatus.EXPIRED) {
+            revert SmartAccount__TaskNotExpired();
+        }
+        if (block.timestamp <= task.deadline + task.delayDuration) {
+            revert SmartAccount__PenaltyDurationNotElapsed();
+        }
+        uint256 releaseTime = task.deadline + task.delayDuration;
+        if (block.timestamp < releaseTime) {
+            revert SmartAccount__PenaltyDurationNotElapsed();
         }
 
+        if (s_totalCommittedReward < task.rewardAmount) {
+            revert SmartAccount__InsufficientCommittedReward();
+        }
+        if (task.delayedRewardReleased) {
+            revert SmartAccount__PaymentAlreadyReleased();
+        }
+        taskManager.releaseDelayedPayment(taskId);
         s_totalCommittedReward -= task.rewardAmount;
         (bool success,) = payable(s_owner).call{value: task.rewardAmount}("");
         if (!success) {
-            revert SimpleAccount__TaskRewardPaymentFailed();
+            revert SmartAccount__TaskRewardPaymentFailed();
         }
 
         emit DelayedPaymentReleased(taskId, task.rewardAmount);

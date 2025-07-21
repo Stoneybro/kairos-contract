@@ -3,8 +3,9 @@ pragma solidity ^0.8.19;
 
 import {AutomationCompatibleInterface} from "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract TaskManager is AutomationCompatibleInterface, Ownable {
+contract TaskManager is AutomationCompatibleInterface, Ownable, ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////
                                  TYPES
     //////////////////////////////////////////////////////////////*/
@@ -25,6 +26,7 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
         uint8 choice;
         uint256 delayDuration;
         address buddy;
+        bool delayedRewardReleased;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -35,7 +37,7 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
     uint256 private s_taskId;
     uint256 public nextExpiringTaskId;
     uint256 public nextDeadline = type(uint256).max;
-    Task[] allTask;
+
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -44,7 +46,9 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
     event TaskCompleted(uint256 indexed taskId);
     event TaskCanceled(uint256 indexed taskId);
     event TaskExpired(uint256 indexed taskId);
-    event TaskDelayedPaymentReleased(uint256 indexed taskId);
+    event TaskExpiredCallFailure(uint256 indexed taskId);
+    event TaskDelayedPaymentReleased(uint256 indexed taskId,uint256 indexed rewardAmount);
+
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -59,6 +63,10 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
     error TaskManager__TaskNotYetExpired();
     error TaskManager__ExpiredTaskCallBackFailed();
     error TaskManager__ReleaseDelayedPaymentFailed();
+    error TaskManager__EmptyDescription();
+    error TaskManager__RewardAmountMustBeGreaterThanZero();
+    error TaskManager__InvalidDeadline();
+    error TaskManager__InvalidPenaltyConfig();
 
     /*CONSTRUCTOR*/
     constructor(address owner) Ownable(owner) {}
@@ -75,31 +83,43 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
                                FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function createTask(string calldata description, uint256 rewardAmount, uint256 durationInSeconds, uint8 choice, uint256 delayDuration,address buddy)
-        external
-        onlyOwner
-        returns (uint256, bool)
-    {
-        uint256 deadline = block.timestamp + durationInSeconds;
-        
+    function createTask(
+        string calldata description,
+        uint256 rewardAmount,
+        uint256 deadlineInSeconds,
+        uint8 choice,
+        uint256 delayDuration,
+        address buddy
+    ) external onlyOwner returns (uint256, bool) {
+        if (bytes(description).length == 0) {
+            revert TaskManager__EmptyDescription();
+        }
+        if (rewardAmount == 0) {
+            revert TaskManager__RewardAmountMustBeGreaterThanZero();
+        }
+        if (choice == 2 && buddy == address(0)) {
+            revert TaskManager__InvalidPenaltyConfig();
+        }
+        uint256 deadline = block.timestamp + deadlineInSeconds;
+
         s_tasks[s_taskId] = Task({
             id: s_taskId,
             description: description,
             rewardAmount: rewardAmount,
             deadline: deadline,
-            valid: true, // Set to true immediately
+            valid: true, 
             status: TaskStatus.PENDING,
             choice: choice,
             delayDuration: delayDuration,
-            buddy:buddy
+            buddy: buddy,
+            delayedRewardReleased: false
         });
-        
-        // Update next expiring task if this task expires sooner
+
         if (deadline < nextDeadline) {
             nextExpiringTaskId = s_taskId;
             nextDeadline = deadline;
         }
-        allTask.push(s_tasks[s_taskId]);
+
         emit TaskCreated(s_taskId, description, rewardAmount);
         uint256 currentTaskId = s_taskId;
         s_taskId++;
@@ -117,10 +137,9 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
                 count++;
             }
         }
-
-        if (count > 0) {
-            upkeepNeeded = true;
-            // Create a properly sized array for encoding
+        upkeepNeeded = count > 0;
+        if (upkeepNeeded) {
+           
             uint256[] memory validExpiredTaskIds = new uint256[](count);
             for (uint256 i = 0; i < count; i++) {
                 validExpiredTaskIds[i] = expiredTaskIds[i];
@@ -139,40 +158,25 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
             uint256 taskId = expiredTaskIds[i];
             Task storage task = s_tasks[taskId];
 
-            // Re-verify the task should be expired
             if (task.valid && task.status == TaskStatus.PENDING && block.timestamp > task.deadline) {
-                task.status = TaskStatus.EXPIRED;
-                allTask[taskId].status=TaskStatus.EXPIRED;
-                // Call the owner's callback function
-                (bool success,) = payable(owner()).call(
-                    abi.encodeWithSignature("expiredTaskCallback(uint256)", taskId)
-                );
-
-                if (!success) {
-                    revert TaskManager__ExpiredTaskCallBackFailed();
-                }
+                s_tasks[taskId].status = TaskStatus.EXPIRED;
 
                 emit TaskExpired(taskId);
-            }
-            if (task.valid && task.status == TaskStatus.EXPIRED && block.timestamp > task.deadline + task.delayDuration){
-                (bool success,) = payable(owner()).call(
-                    abi.encodeWithSignature("releaseDelayedPayment(uint256)", taskId)
-                );
-                if (!success) {
-                    revert TaskManager__ReleaseDelayedPaymentFailed();
-                }
 
-                emit TaskDelayedPaymentReleased(taskId);
+                (bool success,) = payable(owner()).call(abi.encodeWithSignature("expiredTaskCallback(uint256)", taskId));
+
+                if (!success) {
+                    emit TaskExpiredCallFailure(taskId);
+                }
             }
-            
         }
 
         _updateNextExpiringTask();
     }
 
-    function expireTask(uint256 taskId) external taskExist(taskId) {
+    function expireTask(uint256 taskId) external onlyOwner taskExist(taskId) {
         Task storage task = s_tasks[taskId];
-        
+
         if (!task.valid) {
             revert TaskManager__TaskDoesntExist();
         }
@@ -183,11 +187,10 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
             revert TaskManager__TaskHasExpired();
         }
         if (task.status != TaskStatus.PENDING) {
-            revert TaskManager__TaskHasBeenCanceled(); // Generic error for non-pending tasks
+            revert TaskManager__TaskHasBeenCanceled();
         }
-        
-        task.status = TaskStatus.EXPIRED;
-        allTask[taskId].status=TaskStatus.EXPIRED;
+
+        s_tasks[taskId].status = TaskStatus.EXPIRED;
         if (taskId == nextExpiringTaskId) {
             _updateNextExpiringTask();
         }
@@ -197,7 +200,7 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
 
     function completeTask(uint256 taskId) external taskExist(taskId) onlyOwner {
         Task storage task = s_tasks[taskId];
-        
+
         if (!task.valid) {
             revert TaskManager__TaskDoesntExist();
         }
@@ -210,9 +213,8 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
         if (task.status == TaskStatus.CANCELED) {
             revert TaskManager__TaskHasBeenCanceled();
         }
-        
-        task.status = TaskStatus.COMPLETED;
-        allTask[taskId].status=TaskStatus.COMPLETED;
+
+        s_tasks[taskId].status = TaskStatus.COMPLETED;
         emit TaskCompleted(taskId);
 
         if (taskId == nextExpiringTaskId) {
@@ -222,7 +224,7 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
 
     function cancelTask(uint256 taskId) external taskExist(taskId) onlyOwner {
         Task storage task = s_tasks[taskId];
-        
+
         if (!task.valid) {
             revert TaskManager__TaskDoesntExist();
         }
@@ -235,21 +237,37 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
         if (task.status == TaskStatus.EXPIRED) {
             revert TaskManager__TaskHasExpired();
         }
-        
-        task.status = TaskStatus.CANCELED;
-        allTask[taskId].status=TaskStatus.CANCELED;
+        s_tasks[taskId].status = TaskStatus.CANCELED;
         if (taskId == nextExpiringTaskId) {
             _updateNextExpiringTask();
         }
-        
+
         emit TaskCanceled(taskId);
     }
 
-    function _updateNextExpiringTask() internal {
+    function releaseDelayedPayment(uint256 taskId) external taskExist(taskId) onlyOwner {
+        Task storage task = s_tasks[taskId];
+        if (!task.valid) {
+            revert TaskManager__TaskDoesntExist();
+        }
+        if (block.timestamp <= task.deadline+task.delayDuration) {
+            revert TaskManager__TaskNotYetExpired();
+        }
+        if (task.status!=TaskStatus.EXPIRED) {
+            revert TaskManager__TaskNotYetExpired();
+        }
+        if (task.choice!=1) {
+            revert TaskManager__InvalidPenaltyConfig();
+        }
+        task.delayedRewardReleased=true;
+        emit TaskDelayedPaymentReleased(taskId,task.rewardAmount);
+    }
+
+    function _updateNextExpiringTask() internal nonReentrant {
         uint256 soonestDeadline = type(uint256).max;
         uint256 soonestTaskId = 0;
         bool foundPendingTask = false;
-        
+
         for (uint256 i = 0; i < s_taskId; i++) {
             Task storage task = s_tasks[i];
             if (task.valid && task.status == TaskStatus.PENDING && task.deadline < soonestDeadline) {
@@ -258,7 +276,7 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
                 foundPendingTask = true;
             }
         }
-        
+
         if (foundPendingTask) {
             nextExpiringTaskId = soonestTaskId;
             nextDeadline = soonestDeadline;
@@ -275,14 +293,19 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
         }
         return task;
     }
-    function getAllTasks() external view returns(Task[] memory){
-        return allTask;   
+
+    function getAllTasks() external view returns (Task[] memory) {
+        Task[] memory tasks = new Task[](s_taskId);
+        for (uint256 i = 0; i < s_taskId; i++) {
+            tasks[i] = s_tasks[i];
+        }
+        return tasks;
     }
 
     function getTotalTasks() external view returns (uint256) {
         return s_taskId;
     }
-    
+
     function isValidTask(uint256 taskId) external view returns (bool) {
         if (taskId >= s_taskId) {
             return false;
@@ -290,3 +313,5 @@ contract TaskManager is AutomationCompatibleInterface, Ownable {
         return s_tasks[taskId].valid;
     }
 }
+
+

@@ -1,472 +1,411 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {AccountFactory} from "src/AccountFactory.sol";
-import {Script, console} from "forge-std/Script.sol";
-import {HelperConfig} from "script/HelperConfig.s.sol";
-import {MessageHashUtils} from "lib/openzeppelin-contracts/contracts/utils/cryptography/MessageHashUtils.sol";
-import {PackedUserOperation} from "lib/account-abstraction/contracts/interfaces/PackedUserOperation.sol";
+import "forge-std/Script.sol";
+import "forge-std/console2.sol";
+import {AccountFactory} from "../src/AccountFactory.sol";
+import {SmartAccount} from "../src/SmartAccount.sol";
+import {TaskManager} from "../src/TaskManager.sol";
 import {IEntryPoint} from "lib/account-abstraction/contracts/interfaces/IEntryPoint.sol";
-import {SimpleAccount} from "src/SimpleAccount.sol";
 
-/**
- * @title Complete Flow Test Script
- * @notice Tests the entire user journey from account creation to task management
- */
-contract CompleteFlowTest is Script {
-    using MessageHashUtils for bytes32;
+contract InteractionScript is Script {
+    // Deployer private key and address
+    uint256 private constant DEPLOYER_PRIVATE_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+    address private constant DEPLOYER_ADDRESS = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
     
-    // Configuration
-    HelperConfig.NetworkConfig config;
-    AccountFactory factory;
-    SimpleAccount smartAccount;
-    address owner;
-    uint256 ownerPrivateKey;
+    // Mock EntryPoint address (replace with actual EntryPoint address on your network)
+    address private constant ENTRY_POINT = 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789;
     
-    function setUp() public {
-        // Set up configuration
-        HelperConfig configHelper = new HelperConfig();
-        config = configHelper.getConfig();
-        
-        // Use different accounts for different networks
-        if (block.chainid == 31337) { // Anvil
-            ownerPrivateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80; // Anvil account[0]
-            owner = vm.addr(ownerPrivateKey);
-        } else {
-            ownerPrivateKey = vm.envUint("PRIVATE_KEY");
-            owner = vm.addr(ownerPrivateKey);
-        }
-        
-        console.log("Owner address:", owner);
-        console.log("EntryPoint address:", config.entryPoint);
-    }
+    // Test addresses for buddy system
+    address private constant BUDDY_ADDRESS = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
+    address private constant USER_ADDRESS = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
+    
+    AccountFactory public accountFactory;
+    SmartAccount public userAccount;
+    TaskManager public taskManager;
     
     function run() external {
-        setUp();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
         
-        console.log("=== Starting Complete Flow Test ===");
+        console2.log("=== Task Management System Interaction Script ===");
+        console2.log("Deployer Address:", DEPLOYER_ADDRESS);
+        console2.log("Entry Point:", ENTRY_POINT);
         
-        // Step 1: Deploy AccountFactory (if not already deployed)
-        address factoryAddr = deployAccountFactory();
+        // Step 1: Deploy AccountFactory
+        deployAccountFactory();
         
-        // Step 2: Create Smart Account
-        address accountAddr = createSmartAccount(factoryAddr);
+        // Step 2: Create a user account
+        createUserAccount();
         
-        // Step 3: Fund the account
-        fundAccount(accountAddr);
+        // Step 3: Fund the user account
+        fundUserAccount();
         
-        // Step 4: Deploy and link TaskManager
-        deployTaskManager(accountAddr);
+        // Step 4: Test task creation scenarios
+        testTaskCreationScenarios();
         
-        // Step 5: Set penalty mechanism
-        setPenaltyMechanism(accountAddr);
+        // Step 5: Test task completion
+        testTaskCompletion();
         
-        // Step 6: Create tasks
-        createTasks(accountAddr);
+        // Step 6: Test task cancellation
+        testTaskCancellation();
         
-        // Step 7: Complete a task
-        completeTask(accountAddr, 0);
+        // Step 7: Test penalty mechanisms
+        testPenaltyMechanisms();
         
-        // Step 8: Let a task expire and test penalty
-        testTaskExpiry(accountAddr);
-        
-        console.log("=== Complete Flow Test Finished ===");
-    }
-    
-    function deployAccountFactory() internal returns (address) {
-        console.log("\n--- Step 1: Deploying Account Factory ---");
-        
-        vm.startBroadcast(ownerPrivateKey);
-        factory = new AccountFactory(config.entryPoint, owner);
-        vm.stopBroadcast();
-        
-        console.log("AccountFactory deployed at:", address(factory));
-        return address(factory);
-    }
-    
-    function createSmartAccount(address factoryAddr) internal returns (address) {
-        console.log("\n--- Step 2: Creating Smart Account ---");
-        
-        factory = AccountFactory(factoryAddr);
-        uint256 nonce = 0;
-        
-        vm.startBroadcast(ownerPrivateKey);
-        address accountAddr = factory.createAccount(nonce);
-        vm.stopBroadcast();
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        console.log("Smart Account created at:", accountAddr);
-        console.log("Account owner:", smartAccount.s_owner());
-        
-        return accountAddr;
-    }
-    
-    function fundAccount(address accountAddr) internal {
-        console.log("\n--- Step 3: Funding Account ---");
-        
-        vm.startBroadcast(ownerPrivateKey);
-        payable(accountAddr).transfer(1 ether); // Fund with 1 ETH
-        vm.stopBroadcast();
-        
-        console.log("Account funded with 1 ETH");
-        console.log("Account balance:", address(accountAddr).balance);
-    }
-    
-    function deployTaskManager(address accountAddr) internal {
-        console.log("\n--- Step 4: Deploying TaskManager ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Use UserOperation to deploy TaskManager
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.deployAndLinkTaskManager.selector
-        );
-        
-        executeUserOperation(callData, 0, "Deploy TaskManager");
-        
-        address taskManagerAddr = address(smartAccount.taskManager());
-        console.log("TaskManager deployed and linked at:", taskManagerAddr);
-    }
-    
-    function setPenaltyMechanism(address accountAddr) internal {
-        console.log("\n--- Step 5: Setting Penalty Mechanism ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Set delay penalty of 1 hour (3600 seconds)
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.setDelayPenalty.selector,
-            3600 // 1 hour delay
-        );
-        
-        executeUserOperation(callData, 0, "Set Delay Penalty");
-        console.log("Delay penalty set to 1 hour");
-    }
-    
-    function createTasks(address accountAddr) internal {
-        console.log("\n--- Step 6: Creating Tasks ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Create Task 1: Short deadline (30 seconds) - will be completed
-        bytes memory callData1 = abi.encodeWithSelector(
-            SimpleAccount.createTask.selector,
-            "Complete morning workout",
-            0.1 ether,
-            30 // 30 seconds deadline
-        );
-        
-        executeUserOperation(callData1, 0, "Create Task 1");
-        console.log("Task 1 created: Morning workout (30s deadline, 0.1 ETH reward)");
-        
-        // Create Task 2: Longer deadline (60 seconds) - will expire
-        bytes memory callData2 = abi.encodeWithSelector(
-            SimpleAccount.createTask.selector,
-            "Read 10 pages of book",
-            0.05 ether,
-            60 // 60 seconds deadline
-        );
-        
-        executeUserOperation(callData2, 0, "Create Task 2");
-        console.log("Task 2 created: Read book (60s deadline, 0.05 ETH reward)");
-        
-        // Check total committed rewards
-        console.log("Total committed rewards:", smartAccount.s_totalCommittedReward());
-    }
-    
-    function completeTask(address accountAddr, uint256 taskId) internal {
-        console.log("\n--- Step 7: Completing Task ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        uint256 balanceBefore = owner.balance;
-        
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.completeTask.selector,
-            taskId
-        );
-        
-        executeUserOperation(callData, 0, "Complete Task");
-        
-        uint256 balanceAfter = owner.balance;
-        console.log("Task", taskId, "completed!");
-        console.log("Owner balance increased by:", balanceAfter - balanceBefore);
-    }
-    
-    function testTaskExpiry(address accountAddr) internal {
-        console.log("\n--- Step 8: Testing Task Expiry ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Wait for task to expire (advance time by 65 seconds)
-        vm.warp(block.timestamp + 65);
-        console.log("Time advanced by 65 seconds");
-        
-        // Manually expire the second task
-        bytes memory callData = abi.encodeWithSelector(
-            smartAccount.taskManager().expireTask.selector,
-            1 // Task ID 1 (second task)
-        );
-        
-        // Call directly on TaskManager since expireTask is not owner-restricted
-        vm.startBroadcast(ownerPrivateKey);
-        (bool success,) = address(smartAccount.taskManager()).call(callData);
-        vm.stopBroadcast();
-        
-        if (success) {
-            console.log("Task 1 expired - penalty mechanism triggered");
-        } else {
-            console.log("Failed to expire task");
-        }
-        
-        // Try to release delayed payment after delay period
-        vm.warp(block.timestamp + 3601); // Wait for delay period
-        
-        bytes memory releaseCallData = abi.encodeWithSelector(
-            SimpleAccount.releaseDelayedPayment.selector,
-            1
-        );
-        
-        executeUserOperation(releaseCallData, 0, "Release Delayed Payment");
-        console.log("Delayed payment released after penalty period");
-    }
-    
-    function executeUserOperation(bytes memory callData, uint256 value, string memory description) internal {
-        console.log("Executing:", description);
-        
-        // Prepare the execute call
-        bytes memory executeCallData = abi.encodeWithSelector(
-            SimpleAccount.execute.selector,
-            address(smartAccount),
-            value,
-            callData
-        );
-        
-        // Generate and execute UserOperation
-        PackedUserOperation memory userOp = generateSignedUserOperation(
-            executeCallData,
-            address(smartAccount)
-        );
-        
-        vm.startBroadcast(ownerPrivateKey);
-        
-        PackedUserOperation[] memory userOps = new PackedUserOperation[](1);
-        userOps[0] = userOp;
-        
-        try IEntryPoint(config.entryPoint).handleOps(userOps, payable(owner)) {
-            console.log(" UserOperation executed successfully");
-        } catch Error(string memory reason) {
-            console.log(" UserOperation failed:", reason);
-        } catch {
-            console.log(" UserOperation failed with unknown error");
-        }
+        // Step 8: Test edge cases and error conditions
+        testErrorConditions();
         
         vm.stopBroadcast();
+        
+        console2.log("=== Script Execution Completed ===");
     }
     
-    function generateSignedUserOperation(
-        bytes memory callData,
-        address sender
-    ) internal view returns (PackedUserOperation memory) {
-        uint256 nonce = IEntryPoint(config.entryPoint).getNonce(sender, 0);
-        PackedUserOperation memory userOp = _generateUnsignedUserOperation(callData, sender, nonce);
+    function deployAccountFactory() internal {
+        console2.log("\n--- Step 1: Deploying AccountFactory ---");
         
-        bytes32 userOpHash = IEntryPoint(config.entryPoint).getUserOpHash(userOp);
-        bytes32 digest = userOpHash.toEthSignedMessageHash();
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPrivateKey, digest);
-        userOp.signature = abi.encodePacked(r, s, v);
-        
-        return userOp;
+        accountFactory = new AccountFactory(ENTRY_POINT, DEPLOYER_ADDRESS);
+        console2.log("AccountFactory deployed at:", address(accountFactory));
+        console2.log("Implementation address:", accountFactory.implementation());
     }
     
-    function _generateUnsignedUserOperation(
-        bytes memory callData,
-        address sender,
-        uint256 nonce
-    ) internal pure returns (PackedUserOperation memory) {
-        uint128 verificationGasLimit = 1e6;
-        uint128 callGasLimit = 1e6;
-        uint128 maxPriorityFeePerGas = 1e9;
-        uint128 maxFeePerGas = 2e9;
+    function createUserAccount() internal {
+        console2.log("\n--- Step 2: Creating User Account ---");
         
-        return PackedUserOperation({
-            sender: sender,
-            nonce: nonce,
-            initCode: hex"",
-            callData: callData,
-            accountGasLimits: bytes32(uint256(verificationGasLimit) << 128 | callGasLimit),
-            preVerificationGas: verificationGasLimit,
-            gasFees: bytes32(uint256(maxPriorityFeePerGas) << 128 | maxFeePerGas),
-            paymasterAndData: hex"",
-            signature: hex""
-        });
-    }
-}
-
-/**
- * @title Simple Account Creation Script
- * @notice Basic script to create an account
- */
-contract CreateAccountScript is Script {
-    function run() external {
-        // Get configuration
-        HelperConfig configHelper = new HelperConfig();
-        HelperConfig.NetworkConfig memory config = configHelper.getConfig();
+        // Switch to user for account creation
+        vm.stopBroadcast();
+        vm.startBroadcast(vm.addr(0x2));
         
-        // Set up owner
-        uint256 ownerPrivateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
-        address owner = vm.addr(ownerPrivateKey);
+        uint256 userNonce = 0;
+        address predictedAddress = accountFactory.getAddress(userNonce);
+        console2.log("Predicted account address:", predictedAddress);
         
-        vm.startBroadcast(ownerPrivateKey);
+        address createdAccount = accountFactory.createAccount(userNonce);
+        console2.log("Created account address:", createdAccount);
         
-        // Deploy factory
-        AccountFactory factory = new AccountFactory(config.entryPoint, owner);
-        console.log("Factory deployed at:", address(factory));
+        require(createdAccount == predictedAddress, "Address mismatch");
         
-        // Create account
-        uint256 nonce = 0;
-        address account = factory.createAccount(nonce);
-        console.log("Created account at:", account);
+        userAccount = SmartAccount(payable(createdAccount));
+        taskManager = TaskManager(userAccount.getTaskManagerAddress());
         
-        // Fund the account
-        payable(account).transfer(0.5 ether);
-        console.log("Account funded with 0.5 ETH");
+        console2.log("Task Manager address:", address(taskManager));
+        console2.log("Account owner:", userAccount.s_owner());
         
         vm.stopBroadcast();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
     }
-}
-
-/**
- * @title Task Management Test Script
- * @notice Tests task creation, completion, and expiry
- */
-contract TaskManagementTest is Script {
-    using MessageHashUtils for bytes32;
     
-    address constant SMART_ACCOUNT = 0x73Ff90Df627AA6d6fe997FEC4CcAE2eF736F03e3; // Update this
-    uint256 constant OWNER_PRIVATE_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+    function fundUserAccount() internal {
+        console2.log("\n--- Step 3: Funding User Account ---");
+        
+        uint256 fundingAmount = 10 ether;
+        (bool success,) = payable(address(userAccount)).call{value: fundingAmount}("");
+        require(success, "Funding failed");
+        
+        console2.log("Account balance:", address(userAccount).balance);
+        console2.log("Committed rewards:", userAccount.s_totalCommittedReward());
+    }
     
-    function run() external {
-        address owner = vm.addr(OWNER_PRIVATE_KEY);
+    function testTaskCreationScenarios() internal {
+        console2.log("\n--- Step 4: Testing Task Creation Scenarios ---");
         
-        // Get configuration
-        HelperConfig configHelper = new HelperConfig();
-        HelperConfig.NetworkConfig memory config = configHelper.getConfig();
+        // Switch to account owner for task operations
+        vm.stopBroadcast();
+        vm.startBroadcast(vm.addr(0x2));
         
-        SimpleAccount smartAccount = SimpleAccount(payable(SMART_ACCOUNT));
+        // Scenario 1: Create task with delayed payment penalty
+        console2.log("\nScenario 1: Delayed Payment Penalty");
+        userAccount.createTask(
+            "Complete daily workout",
+            1 ether,                    // reward amount
+            3600,                       // deadline in seconds (1 hour)
+            1,                          // PENALTY_DELAYEDPAYMENT
+            address(0),                 // buddy not needed for delayed payment
+            86400                       // delay duration (1 day)
+        );
         
-        // Test 1: Deploy TaskManager if not exists
-        if (address(smartAccount.taskManager()) == address(0)) {
-            console.log("Deploying TaskManager...");
-            executeUserOp(
-                abi.encodeWithSelector(SimpleAccount.deployAndLinkTaskManager.selector),
-                config,
-                owner,
-                SMART_ACCOUNT,
-                0
+        // Scenario 2: Create task with buddy penalty
+        console2.log("Scenario 2: Send to Buddy Penalty");
+        userAccount.createTask(
+            "Read 30 pages of book",
+            0.5 ether,                  // reward amount
+            7200,                       // deadline in seconds (2 hours)
+            2,                          // PENALTY_SENDBUDDY
+            BUDDY_ADDRESS,              // buddy address
+            0                           // delay duration not needed
+        );
+        
+        // Scenario 3: Create multiple tasks
+        console2.log("Scenario 3: Multiple Tasks");
+        for (uint i = 0; i < 3; i++) {
+            userAccount.createTask(
+                string(abi.encodePacked("Task ", vm.toString(i + 3))),
+                0.2 ether,
+                1800,                   // 30 minutes
+                1,                      // PENALTY_DELAYEDPAYMENT
+                address(0),
+                3600                    // 1 hour delay
             );
         }
         
-        // Test 2: Set penalty mechanism
-        console.log("Setting delay penalty...");
-        executeUserOp(
-            abi.encodeWithSelector(SimpleAccount.setDelayPenalty.selector, 1800), // 30 minutes
-            config,
-            owner,
-            SMART_ACCOUNT,
-            0
-        );
+        uint256 totalTasks = userAccount.getTotalTasks();
+        console2.log("Total tasks created:", totalTasks);
+        console2.log("Updated committed rewards:", userAccount.s_totalCommittedReward());
         
-        // Test 3: Create a task
-        console.log("Creating task...");
-        bytes memory taskCallData = abi.encodeWithSelector(
-            SimpleAccount.createTask.selector,
-            "Complete daily exercise",
-            0.01 ether,
-            300 // 5 minutes
-        );
-        
-        executeUserOp(taskCallData, config, owner, SMART_ACCOUNT, 0);
-        
-        console.log("Task created successfully!");
-        console.log("Total committed rewards:", smartAccount.s_totalCommittedReward());
-    }
-    
-    function executeUserOp(
-        bytes memory functionData,
-        HelperConfig.NetworkConfig memory config,
-        address owner,
-        address smartAccount,
-        uint256 value
-    ) internal {
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.execute.selector,
-            smartAccount,
-            value,
-            functionData
-        );
-        
-        vm.startBroadcast(OWNER_PRIVATE_KEY);
-        
-        // Fund account if needed
-        if (smartAccount.balance < 0.1 ether) {
-            payable(smartAccount).transfer(0.1 ether);
+        // Display all tasks
+        TaskManager.Task[] memory allTasks = userAccount.getAllTasks();
+        for (uint i = 0; i < allTasks.length; i++) {
+            console2.log("Task", i, "- Description:", allTasks[i].description);
+            console2.log("  Reward:", allTasks[i].rewardAmount);
+            console2.log("  Deadline:", allTasks[i].deadline);
+            console2.log("  Status:", uint(allTasks[i].status));
         }
         
-        PackedUserOperation memory userOp = generateSignedUserOperation(
-            callData,
-            config,
-            OWNER_PRIVATE_KEY,
-            smartAccount
-        );
-        
-        PackedUserOperation[] memory userOps = new PackedUserOperation[](1);
-        userOps[0] = userOp;
-        
-        IEntryPoint(config.entryPoint).handleOps(userOps, payable(owner));
+        vm.stopBroadcast();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+    }
+    
+    function testTaskCompletion() internal {
+        console2.log("\n--- Step 5: Testing Task Completion ---");
         
         vm.stopBroadcast();
+        vm.startBroadcast(vm.addr(0x2));
+        
+        uint256 balanceBefore = vm.addr(0x2).balance;
+        console2.log("User balance before completion:", balanceBefore);
+        
+        // Complete first task (task ID 0)
+        userAccount.completeTask(0);
+        
+        uint256 balanceAfter = vm.addr(0x2).balance;
+        console2.log("User balance after completion:", balanceAfter);
+        console2.log("Reward received:", balanceAfter - balanceBefore);
+        console2.log("Updated committed rewards:", userAccount.s_totalCommittedReward());
+        
+        // Verify task status
+        TaskManager.Task memory completedTask = userAccount.getTask(0);
+        console2.log("Task 0 status:", uint(completedTask.status));
+        
+        vm.stopBroadcast();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
     }
     
-    function generateSignedUserOperation(
-        bytes memory callData,
-        HelperConfig.NetworkConfig memory config,
-        uint256 privateKey,
-        address sender
-    ) internal view returns (PackedUserOperation memory) {
-        uint256 nonce = IEntryPoint(config.entryPoint).getNonce(sender, 0);
-        PackedUserOperation memory userOp = _generateUnsignedUserOperation(callData, sender, nonce);
+    function testTaskCancellation() internal {
+        console2.log("\n--- Step 6: Testing Task Cancellation ---");
         
-        bytes32 userOpHash = IEntryPoint(config.entryPoint).getUserOpHash(userOp);
-        bytes32 digest = userOpHash.toEthSignedMessageHash();
+        vm.stopBroadcast();
+        vm.startBroadcast(vm.addr(0x2));
         
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
-        userOp.signature = abi.encodePacked(r, s, v);
+        uint256 committedBefore = userAccount.s_totalCommittedReward();
+        console2.log("Committed rewards before cancellation:", committedBefore);
         
-        return userOp;
+        // Cancel task ID 2
+        userAccount.cancelTask(2);
+        
+        uint256 committedAfter = userAccount.s_totalCommittedReward();
+        console2.log("Committed rewards after cancellation:", committedAfter);
+        console2.log("Rewards freed up:", committedBefore - committedAfter);
+        
+        // Verify task status
+        TaskManager.Task memory canceledTask = userAccount.getTask(2);
+        console2.log("Task 2 status:", uint(canceledTask.status));
+        
+        vm.stopBroadcast();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
     }
     
-    function _generateUnsignedUserOperation(
-        bytes memory callData,
-        address sender,
-        uint256 nonce
-    ) internal pure returns (PackedUserOperation memory) {
-        uint128 verificationGasLimit = 1e6;
-        uint128 callGasLimit = 1e6;
-        uint128 maxPriorityFeePerGas = 1e9;
-        uint128 maxFeePerGas = 2e9;
+    function testPenaltyMechanisms() internal {
+        console2.log("\n--- Step 7: Testing Penalty Mechanisms ---");
         
-        return PackedUserOperation({
-            sender: sender,
-            nonce: nonce,
-            initCode: hex"",
-            callData: callData,
-            accountGasLimits: bytes32(uint256(verificationGasLimit) << 128 | callGasLimit),
-            preVerificationGas: verificationGasLimit,
-            gasFees: bytes32(uint256(maxPriorityFeePerGas) << 128 | maxFeePerGas),
-            paymasterAndData: hex"",
-            signature: hex""
-        });
+        // Fast forward time to make task 1 expire (buddy penalty)
+        console2.log("Fast forwarding time to expire task 1...");
+        vm.warp(block.timestamp + 7300); // Move past 2 hour deadline
+        
+        // Simulate Chainlink automation calling performUpkeep
+        console2.log("Simulating Chainlink automation...");
+        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
+        console2.log("Upkeep needed:", upkeepNeeded);
+        
+        if (upkeepNeeded) {
+            uint256 buddyBalanceBefore = BUDDY_ADDRESS.balance;
+            console2.log("Buddy balance before penalty:", buddyBalanceBefore);
+            
+            taskManager.performUpkeep(performData);
+            
+            uint256 buddyBalanceAfter = BUDDY_ADDRESS.balance;
+            console2.log("Buddy balance after penalty:", buddyBalanceAfter);
+            console2.log("Penalty amount received by buddy:", buddyBalanceAfter - buddyBalanceBefore);
+            
+            // Check task status
+            TaskManager.Task memory expiredTask = userAccount.getTask(1);
+            console2.log("Task 1 status:", uint(expiredTask.status));
+        }
+        
+        // Test delayed payment mechanism
+        console2.log("\nTesting delayed payment mechanism...");
+        
+        // Fast forward to expire task 3 (delayed payment penalty)
+        vm.warp(block.timestamp + 1900); // Move past 30 min deadline
+        
+        (upkeepNeeded, performData) = taskManager.checkUpkeep("");
+        if (upkeepNeeded) {
+            taskManager.performUpkeep(performData);
+            console2.log("Task 3 expired with delayed payment penalty");
+        }
+        
+        // Try to release delayed payment before delay duration
+        vm.stopBroadcast();
+        vm.startBroadcast(vm.addr(0x2));
+        TaskManager.Task memory task3 = userAccount.getTask(3);
+        vm.warp(task3.deadline+task3.delayDuration-10);
+        try userAccount.releaseDelayedPayment(3) {
+            console2.log("ERROR: Should not be able to release payment early");
+        } catch {
+            console2.log("Correctly prevented early payment release");
+        }
+        
+        // Fast forward past delay duration
+        console2.log("Fast forwarding past delay duration...");
+        vm.warp(task3.deadline+task3.delayDuration+10); // Move past 1 hour delay
+        
+
+        uint256 userBalanceBefore = vm.addr(0x2).balance;
+        userAccount.releaseDelayedPayment(3);
+        uint256 userBalanceAfter = vm.addr(0x2).balance;
+        
+        console2.log("Delayed payment released:", userBalanceAfter - userBalanceBefore);
+        
+        vm.stopBroadcast();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+    }
+    
+    function testErrorConditions() internal {
+        console2.log("\n--- Step 8: Testing Error Conditions ---");
+        
+        vm.stopBroadcast();
+        vm.startBroadcast(vm.addr(0x2));
+        
+        // Test insufficient funds for task creation
+        console2.log("Testing insufficient funds scenario...");
+        try userAccount.createTask(
+            "Impossible task",
+            100 ether,                  // More than account balance
+            3600,
+            1,
+            address(0),
+            86400
+        ) {
+            console2.log("ERROR: Should have failed due to insufficient funds");
+        } catch {
+            console2.log("Correctly prevented task creation with insufficient funds");
+        }
+        
+        // Test invalid penalty configurations
+        console2.log("Testing invalid penalty configurations...");
+        
+        // No penalty selected
+        try userAccount.createTask(
+            "No penalty task",
+            0.1 ether,
+            3600,
+            0,                          // No penalty choice
+            address(0),
+            0
+        ) {
+            console2.log("ERROR: Should have failed - no penalty selected");
+        } catch {
+            console2.log("Correctly prevented task creation without penalty choice");
+        }
+        
+        // Buddy penalty without buddy address
+        try userAccount.createTask(
+            "Buddy task without buddy",
+            0.1 ether,
+            3600,
+            2,                          // PENALTY_SENDBUDDY
+            address(0),                 // No buddy address
+            0
+        ) {
+            console2.log("ERROR: Should have failed - buddy penalty without address");
+        } catch {
+            console2.log("Correctly prevented buddy penalty without buddy address");
+        }
+        
+        // Delayed payment without delay duration
+        try userAccount.createTask(
+            "Delayed payment without duration",
+            0.1 ether,
+            3600,
+            1,                          // PENALTY_DELAYEDPAYMENT
+            address(0),
+            0                           // No delay duration
+        ) {
+            console2.log("ERROR: Should have failed - delayed payment without duration");
+        } catch {
+            console2.log("Correctly prevented delayed payment without duration");
+        }
+        
+        // Test zero reward amount
+        try userAccount.createTask(
+            "Zero reward task",
+            0,                          // Zero reward
+            3600,
+            1,
+            address(0),
+            86400
+        ) {
+            console2.log("ERROR: Should have failed - zero reward");
+        } catch {
+            console2.log("Correctly prevented zero reward task");
+        }
+        
+        // Test operations on non-existent tasks
+        try userAccount.completeTask(999) {
+            console2.log("ERROR: Should have failed - non-existent task");
+        } catch {
+            console2.log("Correctly prevented operation on non-existent task");
+        }
+        
+        // Test double completion
+        try userAccount.completeTask(0) {
+            console2.log("ERROR: Should have failed - task already completed");
+        } catch {
+            console2.log("Correctly prevented double completion");
+        }
+        
+        // Test withdrawal of committed rewards
+        try userAccount.transfer(USER_ADDRESS, address(userAccount).balance) {
+            console2.log("ERROR: Should have failed - trying to withdraw committed rewards");
+        } catch {
+            console2.log("Correctly prevented withdrawal of committed rewards");
+        }
+        
+        // Test valid transfer
+        uint256 availableBalance = address(userAccount).balance - userAccount.s_totalCommittedReward();
+        if (availableBalance > 0) {
+            userAccount.transfer(USER_ADDRESS, availableBalance);
+            console2.log("Successfully transferred available balance:", availableBalance);
+        }
+        
+        vm.stopBroadcast();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+    }
+    
+    function displayFinalState() internal view {
+        console2.log("\n=== Final State Summary ===");
+        console2.log("Account balance:", address(userAccount).balance);
+        console2.log("Committed rewards:", userAccount.s_totalCommittedReward());
+        console2.log("Total tasks:", userAccount.getTotalTasks());
+        
+        console2.log("\nTask Status Summary:");
+        TaskManager.Task[] memory allTasks = userAccount.getAllTasks();
+        for (uint i = 0; i < allTasks.length; i++) {
+            string memory statusName;
+            if (allTasks[i].status == TaskManager.TaskStatus.PENDING) statusName = "PENDING";
+            else if (allTasks[i].status == TaskManager.TaskStatus.COMPLETED) statusName = "COMPLETED";
+            else if (allTasks[i].status == TaskManager.TaskStatus.CANCELED) statusName = "CANCELED";
+            else if (allTasks[i].status == TaskManager.TaskStatus.EXPIRED) statusName = "EXPIRED";
+            
+            console2.log("Task", i, ":", statusName);
+        }
     }
 }

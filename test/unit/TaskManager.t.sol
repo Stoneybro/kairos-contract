@@ -1,466 +1,655 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {TaskManager} from "src/TaskManager.sol";
-import {SimpleAccount} from "src/SimpleAccount.sol";
-import {HelperConfig} from "script/HelperConfig.s.sol";
 
 contract TaskManagerTest is Test {
-    TaskManager taskManager;
-    SimpleAccount account;
-    HelperConfig helperConfig;
-    HelperConfig.NetworkConfig config;
-    
-    address owner = makeAddr("OWNER");
-    address user = makeAddr("USER");
-    address buddy = makeAddr("BUDDY");
-    
+    TaskManager public taskManager;
+    address public owner;
+    address public buddy;
+    address public nonOwner;
+
+    // Test constants
+    string constant TASK_DESCRIPTION = "Complete daily workout";
     uint256 constant REWARD_AMOUNT = 1 ether;
-    uint256 constant DURATION = 1 days;
-    string constant TASK_DESCRIPTION = "Test task";
+    uint256 constant DEADLINE_SECONDS = 3600; // 1 hour
+    uint8 constant CHOICE_DELAYED_PAYMENT = 1;
+    uint8 constant CHOICE_SEND_BUDDY = 2;
+    uint256 constant DELAY_DURATION = 86400; // 1 day
 
     event TaskCreated(uint256 indexed taskId, string description, uint256 rewardAmount);
     event TaskCompleted(uint256 indexed taskId);
     event TaskCanceled(uint256 indexed taskId);
     event TaskExpired(uint256 indexed taskId);
+    event TaskExpiredCallFailure(uint256 indexed taskId);
+    event TaskDelayedPaymentReleased(uint256 indexed taskId, uint256 indexed rewardAmount);
 
     function setUp() public {
-        // Setup helper config
-        helperConfig = new HelperConfig();
-        config = helperConfig.getConfig();
+        owner = address(this);
+        buddy = makeAddr("buddy");
+        nonOwner = makeAddr("nonOwner");
         
-        // Create and initialize SimpleAccount
-        account = new SimpleAccount();
-        account.initialize(owner, address(config.entryPoint));
-        vm.deal(address(account), 10 ether);
-        
-        // Create TaskManager with SimpleAccount as owner
-        taskManager = new TaskManager(address(account));
-        
-        // Link TaskManager to SimpleAccount
-        vm.prank(owner);
-        account.linkTaskManager(address(taskManager));
-        
-        // Set penalty for account (required for task creation)
-        vm.prank(owner);
-        account.setDelayPenalty(1 days);
+        taskManager = new TaskManager(owner);
     }
 
     /*//////////////////////////////////////////////////////////////
-                            TASK CREATION TESTS
+                             CONSTRUCTOR TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CreateTask_Success() public {
+    function testConstructorSetsOwner() public view {
+        assertEq(taskManager.owner(), owner);
+    }
+
+    function testInitialState() public view {
+        assertEq(taskManager.getTotalTasks(), 0);
+        assertEq(taskManager.nextExpiringTaskId(), 0);
+        assertEq(taskManager.nextDeadline(), type(uint256).max);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           TASK CREATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testCreateTask() public {
         vm.expectEmit(true, false, false, true);
         emit TaskCreated(0, TASK_DESCRIPTION, REWARD_AMOUNT);
-        
-        vm.prank(address(account));
+
         (uint256 taskId, bool success) = taskManager.createTask(
-            TASK_DESCRIPTION, 
-            REWARD_AMOUNT, 
-            DURATION, 
-            1, // PENALTY_DELAYEDPAYMENT
-            1 days
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
         );
-        
+
         assertTrue(success);
         assertEq(taskId, 0);
-        
-        TaskManager.Task memory task = taskManager.getTask(taskId);
-        assertEq(task.id, taskId);
+        assertEq(taskManager.getTotalTasks(), 1);
+
+        TaskManager.Task memory task = taskManager.getTask(0);
+        assertEq(task.id, 0);
         assertEq(task.description, TASK_DESCRIPTION);
         assertEq(task.rewardAmount, REWARD_AMOUNT);
-        assertEq(task.deadline, block.timestamp + DURATION);
+        assertEq(task.deadline, block.timestamp + DEADLINE_SECONDS);
         assertTrue(task.valid);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.PENDING));
-        assertEq(task.choice, 1);
-        assertEq(task.delayDuration, 1 days);
+        assertEq(task.choice, CHOICE_DELAYED_PAYMENT);
+        assertEq(task.delayDuration, DELAY_DURATION);
+        assertEq(task.buddy, address(0));
+        assertFalse(task.delayedRewardReleased);
     }
 
-    function test_CreateTask_OnlyOwner() public {
+    function testCreateTaskWithBuddy() public {
+        (uint256 taskId, bool success) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_SEND_BUDDY,
+            0,
+            buddy
+        );
+
+        assertTrue(success);
+        TaskManager.Task memory task = taskManager.getTask(taskId);
+        assertEq(task.buddy, buddy);
+        assertEq(task.choice, CHOICE_SEND_BUDDY);
+    }
+
+    function testCreateTaskUpdatesNextExpiringTask() public {
+        uint256 shortDeadline = 1800; // 30 minutes
+        uint256 longDeadline = 7200; // 2 hours
+
+        // Create task with longer deadline first
+        taskManager.createTask(
+            "Long task",
+            REWARD_AMOUNT,
+            longDeadline,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        // Create task with shorter deadline
+        taskManager.createTask(
+            "Short task",
+            REWARD_AMOUNT,
+            shortDeadline,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        // The shorter deadline task should be the next expiring
+        assertEq(taskManager.nextExpiringTaskId(), 1);
+        assertEq(taskManager.nextDeadline(), block.timestamp + shortDeadline);
+    }
+
+    function testCreateTaskRevertsWithEmptyDescription() public {
+        vm.expectRevert(TaskManager.TaskManager__EmptyDescription.selector);
+        taskManager.createTask("", REWARD_AMOUNT, DEADLINE_SECONDS, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0));
+    }
+
+    function testCreateTaskRevertsWithZeroReward() public {
+        vm.expectRevert(TaskManager.TaskManager__RewardAmountMustBeGreaterThanZero.selector);
+        taskManager.createTask(TASK_DESCRIPTION, 0, DEADLINE_SECONDS, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0));
+    }
+
+    function testCreateTaskRevertsWithInvalidPenaltyConfig() public {
+        vm.expectRevert(TaskManager.TaskManager__InvalidPenaltyConfig.selector);
+        taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_SEND_BUDDY,
+            DELAY_DURATION,
+            address(0) // buddy cannot be zero address for choice 2
+        );
+    }
+
+    function testOnlyOwnerCanCreateTask() public {
+        vm.prank(nonOwner);
         vm.expectRevert();
-        vm.prank(user);
-        taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-    }
-
-    function test_CreateMultipleTasks() public {
-        // Create first task
-        vm.prank(address(account));
-        (uint256 taskId1, bool success1) = taskManager.createTask("Task 1", 1 ether, 1 days, 1, 1 days);
-        assertTrue(success1);
-        assertEq(taskId1, 0);
-        
-        // Create second task
-        vm.prank(address(account));
-        (uint256 taskId2, bool success2) = taskManager.createTask("Task 2", 2 ether, 2 days, 2, 2 days);
-        assertTrue(success2);
-        assertEq(taskId2, 1);
-        
-        assertEq(taskManager.getTotalTasks(), 2);
+        taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
-                          TASK COMPLETION TESTS
+                           TASK COMPLETION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CompleteTask_Success() public {
-        // Create task first
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testCompleteTask() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         vm.expectEmit(true, false, false, false);
         emit TaskCompleted(taskId);
-        
-        vm.prank(address(account));
+
         taskManager.completeTask(taskId);
-        
+
         TaskManager.Task memory task = taskManager.getTask(taskId);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.COMPLETED));
     }
 
-    function test_CompleteTask_OnlyOwner() public {
-        // Create task first
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        vm.expectRevert();
-        vm.prank(user);
-        taskManager.completeTask(taskId);
-    }
+    function testCompleteTaskRevertsIfAlreadyCompleted() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
 
-    function test_CompleteTask_NonExistentTask() public {
-        vm.expectRevert(TaskManager.TaskManager__TaskDoesntExist.selector);
-        vm.prank(address(account));
-        taskManager.completeTask(999);
-    }
-
-    function test_CompleteTask_AlreadyCompleted() public {
-        // Create and complete task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        vm.prank(address(account));
         taskManager.completeTask(taskId);
-        
-        // Try to complete again
+
         vm.expectRevert(TaskManager.TaskManager__TaskAlreadyCompleted.selector);
-        vm.prank(address(account));
         taskManager.completeTask(taskId);
     }
 
-    function test_CompleteTask_ExpiredTask() public {
-        // Create task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testCompleteTaskRevertsIfExpired() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         // Fast forward past deadline
-        vm.warp(block.timestamp + DURATION + 1);
-        
-        // Expire the task first
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
         taskManager.expireTask(taskId);
-        
-        // Try to complete expired task
+
         vm.expectRevert(TaskManager.TaskManager__TaskHasExpired.selector);
-        vm.prank(address(account));
+        taskManager.completeTask(taskId);
+    }
+
+    function testCompleteTaskRevertsIfCanceled() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        taskManager.cancelTask(taskId);
+
+        vm.expectRevert(TaskManager.TaskManager__TaskHasBeenCanceled.selector);
+        taskManager.completeTask(taskId);
+    }
+
+    function testOnlyOwnerCanCompleteTask() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        vm.prank(nonOwner);
+        vm.expectRevert();
         taskManager.completeTask(taskId);
     }
 
     /*//////////////////////////////////////////////////////////////
-                          TASK CANCELLATION TESTS
+                           TASK CANCELLATION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CancelTask_Success() public {
-        // Create task first
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testCancelTask() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         vm.expectEmit(true, false, false, false);
         emit TaskCanceled(taskId);
-        
-        vm.prank(address(account));
+
         taskManager.cancelTask(taskId);
-        
+
         TaskManager.Task memory task = taskManager.getTask(taskId);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.CANCELED));
     }
 
-    function test_CancelTask_OnlyOwner() public {
-        // Create task first
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        vm.expectRevert();
-        vm.prank(user);
+    function testCancelTaskRevertsIfAlreadyCanceled() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        taskManager.cancelTask(taskId);
+
+        vm.expectRevert(TaskManager.TaskManager__TaskHasBeenCanceled.selector);
         taskManager.cancelTask(taskId);
     }
 
-    function test_CancelTask_AlreadyCanceled() public {
-        // Create and cancel task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        vm.prank(address(account));
-        taskManager.cancelTask(taskId);
-        
-        // Try to cancel again
-        vm.expectRevert(TaskManager.TaskManager__TaskHasBeenCanceled.selector);
-        vm.prank(address(account));
+    function testOnlyOwnerCanCancelTask() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        vm.prank(nonOwner);
+        vm.expectRevert();
         taskManager.cancelTask(taskId);
     }
 
     /*//////////////////////////////////////////////////////////////
-                          TASK EXPIRATION TESTS
+                           TASK EXPIRATION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_ExpireTask_Success() public {
-        // Create task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testExpireTask() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         // Fast forward past deadline
-        vm.warp(block.timestamp + DURATION + 1);
-        
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
+
         vm.expectEmit(true, false, false, false);
         emit TaskExpired(taskId);
-        
+
         taskManager.expireTask(taskId);
-        
+
         TaskManager.Task memory task = taskManager.getTask(taskId);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.EXPIRED));
     }
 
-    function test_ExpireTask_NotYetExpired() public {
-        // Create task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testExpireTaskRevertsIfNotYetExpired() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         vm.expectRevert(TaskManager.TaskManager__TaskNotYetExpired.selector);
         taskManager.expireTask(taskId);
     }
 
-    function test_ExpireTask_AlreadyExpired() public {
-        // Create task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        // Fast forward and expire
-        vm.warp(block.timestamp + DURATION + 1);
+    function testExpireTaskRevertsIfAlreadyExpired() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        // Fast forward past deadline and expire
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
         taskManager.expireTask(taskId);
-        
-        // Try to expire again
+
         vm.expectRevert(TaskManager.TaskManager__TaskHasExpired.selector);
         taskManager.expireTask(taskId);
     }
 
     /*//////////////////////////////////////////////////////////////
-                          CHAINLINK AUTOMATION TESTS
+                           AUTOMATION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_CheckUpkeep_NoExpiredTasks() public {
-        // Create task that hasn't expired
-        vm.prank(address(account));
-        taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testCheckUpkeepReturnsFalseWhenNoExpiredTasks() public {
+        taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
+        
         assertFalse(upkeepNeeded);
         assertEq(performData.length, 0);
     }
 
-    function test_CheckUpkeep_WithExpiredTask() public {
-        // Create task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        // Fast forward past deadline
-        vm.warp(block.timestamp + DURATION + 1);
-        
+    function testCheckUpkeepReturnsTrueWhenTasksExpired() public {
+        // Create multiple tasks
+        taskManager.createTask("Task 1", REWARD_AMOUNT, 1800, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0)); // 30 min
+        taskManager.createTask("Task 2", REWARD_AMOUNT, 3600, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0)); // 1 hour
+        taskManager.createTask("Task 3", REWARD_AMOUNT, 7200, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0)); // 2 hours
+
+        // Fast forward to expire first two tasks
+        vm.warp(block.timestamp + 3601); // Just past 1 hour
+
         (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
+        
         assertTrue(upkeepNeeded);
         assertTrue(performData.length > 0);
-        
+
         (uint256[] memory expiredTaskIds, uint256 count) = abi.decode(performData, (uint256[], uint256));
-        assertEq(count, 1);
-        assertEq(expiredTaskIds[0], taskId);
+        assertEq(count, 2);
+        assertEq(expiredTaskIds[0], 0); // First task
+        assertEq(expiredTaskIds[1], 1); // Second task
     }
 
-    function test_PerformUpkeep_Success() public {
-        // Create task
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testPerformUpkeep() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
         // Fast forward past deadline
-        vm.warp(block.timestamp + DURATION + 1);
-        
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
+
         // Get upkeep data
         (, bytes memory performData) = taskManager.checkUpkeep("");
-        
-        // Perform upkeep
+
+        vm.expectEmit(true, false, false, false);
+        emit TaskExpired(taskId);
+
         taskManager.performUpkeep(performData);
-        
-        // Check task is expired
+
         TaskManager.Task memory task = taskManager.getTask(taskId);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.EXPIRED));
     }
 
     /*//////////////////////////////////////////////////////////////
-                            GETTER TESTS
+                         DELAYED PAYMENT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_GetTask_Success() public {
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
+    function testReleaseDelayedPayment() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        // Fast forward past deadline to expire task
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
+        taskManager.expireTask(taskId);
+
+        // Fast forward past delay duration
+        vm.warp(block.timestamp + DELAY_DURATION + 1);
+
+        vm.expectEmit(true, true, false, false);
+        emit TaskDelayedPaymentReleased(taskId, REWARD_AMOUNT);
+
+        taskManager.releaseDelayedPayment(taskId);
+
         TaskManager.Task memory task = taskManager.getTask(taskId);
+        assertTrue(task.delayedRewardReleased);
+    }
+
+    function testReleaseDelayedPaymentRevertsIfNotExpired() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        vm.expectRevert(TaskManager.TaskManager__TaskNotYetExpired.selector);
+        taskManager.releaseDelayedPayment(taskId);
+    }
+
+    function testReleaseDelayedPaymentRevertsIfDelayNotElapsed() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        // Fast forward past deadline but not past delay
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
+        taskManager.expireTask(taskId);
+
+        vm.expectRevert(TaskManager.TaskManager__TaskNotYetExpired.selector);
+        taskManager.releaseDelayedPayment(taskId);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              VIEW TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testGetTask() public {
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        TaskManager.Task memory task = taskManager.getTask(taskId);
+        
         assertEq(task.id, taskId);
         assertEq(task.description, TASK_DESCRIPTION);
         assertEq(task.rewardAmount, REWARD_AMOUNT);
         assertTrue(task.valid);
     }
 
-    function test_GetTask_NonExistent() public {
+    function testGetTaskRevertsForInvalidId() public {
         vm.expectRevert(TaskManager.TaskManager__TaskDoesntExist.selector);
         taskManager.getTask(999);
     }
 
-    function test_GetTotalTasks() public {
+    function testGetAllTasks() public {
+        // Create multiple tasks
+        taskManager.createTask("Task 1", 1 ether, DEADLINE_SECONDS, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0));
+        taskManager.createTask("Task 2", 2 ether, DEADLINE_SECONDS, CHOICE_SEND_BUDDY, 0, buddy);
+        
+        TaskManager.Task[] memory tasks = taskManager.getAllTasks();
+        
+        assertEq(tasks.length, 2);
+        assertEq(tasks[0].description, "Task 1");
+        assertEq(tasks[1].description, "Task 2");
+        assertEq(tasks[0].rewardAmount, 1 ether);
+        assertEq(tasks[1].rewardAmount, 2 ether);
+    }
+
+    function testGetTotalTasks() public {
         assertEq(taskManager.getTotalTasks(), 0);
         
-        vm.prank(address(account));
-        taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
+        taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DEADLINE_SECONDS, CHOICE_DELAYED_PAYMENT, DELAY_DURATION, address(0));
         assertEq(taskManager.getTotalTasks(), 1);
         
-        vm.prank(address(account));
-        taskManager.createTask("Task 2", REWARD_AMOUNT, DURATION, 1, 1 days);
+        taskManager.createTask("Another task", REWARD_AMOUNT, DEADLINE_SECONDS, CHOICE_SEND_BUDDY, 0, buddy);
         assertEq(taskManager.getTotalTasks(), 2);
     }
 
-    function test_IsValidTask() public {
+    function testIsValidTask() public {
         assertFalse(taskManager.isValidTask(0));
         
-        vm.prank(address(account));
-        taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
         
-        assertTrue(taskManager.isValidTask(0));
-        assertFalse(taskManager.isValidTask(1));
+        assertTrue(taskManager.isValidTask(taskId));
+        assertFalse(taskManager.isValidTask(taskId + 1));
     }
 
     /*//////////////////////////////////////////////////////////////
-                          EDGE CASE TESTS
+                              FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_MultipleTasksWithDifferentDeadlines() public {
-        // Create tasks with different deadlines
-        vm.prank(address(account));
-        (uint256 taskId1,) = taskManager.createTask("Task 1", REWARD_AMOUNT, 1 days, 1, 1 days);
+    function testFuzzCreateTask(
+        string memory description,
+        uint256 rewardAmount,
+        uint256 deadlineInSeconds,
+        uint8 choice,
+        uint256 delayDuration
+    ) public {
+        // Bound inputs to valid ranges
+        vm.assume(bytes(description).length > 0 && bytes(description).length < 1000);
+        rewardAmount = bound(rewardAmount, 1, type(uint128).max);
+        deadlineInSeconds = bound(deadlineInSeconds, 1, 365 days);
+        choice = uint8(bound(choice, 1, 2));
+        delayDuration = bound(delayDuration, 0, 30 days);
+
+        address testBuddy = choice == 2 ? buddy : address(0);
         
-        vm.prank(address(account));
-         taskManager.createTask("Task 2", REWARD_AMOUNT, 2 days, 1, 1 days);
-        
-        vm.prank(address(account));
-         taskManager.createTask("Task 3", REWARD_AMOUNT, 3 days, 1, 1 days);
-        
-        // Fast forward to expire first task only
-        vm.warp(block.timestamp + 1 days + 1);
-        
-        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
-        assertTrue(upkeepNeeded);
-        
-        (uint256[] memory expiredTaskIds, uint256 count) = abi.decode(performData, (uint256[], uint256));
-        assertEq(count, 1);
-        assertEq(expiredTaskIds[0], taskId1);
+        (uint256 taskId, bool success) = taskManager.createTask(
+            description,
+            rewardAmount,
+            deadlineInSeconds,
+            choice,
+            delayDuration,
+            testBuddy
+        );
+
+        assertTrue(success);
+        TaskManager.Task memory task = taskManager.getTask(taskId);
+        assertEq(task.description, description);
+        assertEq(task.rewardAmount, rewardAmount);
+        assertEq(task.choice, choice);
+        assertEq(task.delayDuration, delayDuration);
     }
 
-    function test_TaskStatusTransitions() public {
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        // Initial state
+    /*//////////////////////////////////////////////////////////////
+                             INTEGRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testCompleteTaskFlow() public {
+        // Create task
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
+        );
+
+        // Verify initial state
         TaskManager.Task memory task = taskManager.getTask(taskId);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.PENDING));
-        
-        // Complete task
-        vm.prank(address(account));
+
+        // Complete task before deadline
         taskManager.completeTask(taskId);
-        
+
+        // Verify completion
         task = taskManager.getTask(taskId);
         assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.COMPLETED));
     }
 
-    function test_NextExpiringTaskTracking() public {
-        // Create tasks with different deadlines
-        vm.prank(address(account));
-        taskManager.createTask("Task 1", REWARD_AMOUNT, 3 days, 1, 1 days);
-        
-        vm.prank(address(account));
-        taskManager.createTask("Task 2", REWARD_AMOUNT, 1 days, 1, 1 days); // This should be next expiring
-        
-        vm.prank(address(account));
-        taskManager.createTask("Task 3", REWARD_AMOUNT, 2 days, 1, 1 days);
-        
-        // The nextExpiringTaskId should be task 1 (shortest deadline)
-        assertEq(taskManager.nextExpiringTaskId(), 1);
-        assertEq(taskManager.nextDeadline(), block.timestamp + 1 days);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            FUZZ TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function testFuzz_CreateTask(uint256 rewardAmount, uint256 duration) public {
-        rewardAmount = bound(rewardAmount, 1 wei, 100 ether);
-        duration = bound(duration, 1 seconds, 365 days);
-        
-        vm.prank(address(account));
-        (uint256 taskId, bool success) = taskManager.createTask(
-            "Fuzz task", 
-            rewardAmount, 
-            duration, 
-            1, 
-            1 days
+    function testExpiredTaskFlow() public {
+        // Create task
+        (uint256 taskId,) = taskManager.createTask(
+            TASK_DESCRIPTION,
+            REWARD_AMOUNT,
+            DEADLINE_SECONDS,
+            CHOICE_DELAYED_PAYMENT,
+            DELAY_DURATION,
+            address(0)
         );
-        
-        assertTrue(success);
-        
-        TaskManager.Task memory task = taskManager.getTask(taskId);
-        assertEq(task.rewardAmount, rewardAmount);
-        assertEq(task.deadline, block.timestamp + duration);
-    }
 
-    function testFuzz_TaskOperations(uint8 operation, uint256 timeWarp) public {
-        // Create a task first
-        vm.prank(address(account));
-        (uint256 taskId,) = taskManager.createTask(TASK_DESCRIPTION, REWARD_AMOUNT, DURATION, 1, 1 days);
-        
-        operation = uint8(bound(operation, 0, 2));
-        timeWarp = bound(timeWarp, 0, DURATION * 2);
-        
-        vm.warp(block.timestamp + timeWarp);
-        
-        if (operation == 0) {
-            // Try to complete
-            try taskManager.completeTask(taskId) {
-                TaskManager.Task memory task = taskManager.getTask(taskId);
-                assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.COMPLETED));
-            } catch {
-                // Expected if task expired or other conditions
-            }
-        } else if (operation == 1) {
-            // Try to cancel
-            try taskManager.cancelTask(taskId) {
-                TaskManager.Task memory task = taskManager.getTask(taskId);
-                assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.CANCELED));
-            } catch {
-                // Expected if task expired or other conditions
-            }
-        } else {
-            // Try to expire
-            try taskManager.expireTask(taskId) {
-                TaskManager.Task memory task = taskManager.getTask(taskId);
-                assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.EXPIRED));
-            } catch {
-                // Expected if not yet expired
-            }
-        }
+        // Fast forward past deadline
+        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
+
+        // Check upkeep detects expired task
+        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
+        assertTrue(upkeepNeeded);
+
+        // Perform upkeep
+        taskManager.performUpkeep(performData);
+
+        // Verify expiration
+        TaskManager.Task memory task = taskManager.getTask(taskId);
+        assertEq(uint8(task.status), uint8(TaskManager.TaskStatus.EXPIRED));
+
+        // Fast forward past delay duration
+        vm.warp(block.timestamp + DELAY_DURATION + 1);
+
+        // Release delayed payment
+        taskManager.releaseDelayedPayment(taskId);
+        task = taskManager.getTask(taskId);
+        assertTrue(task.delayedRewardReleased);
     }
 }

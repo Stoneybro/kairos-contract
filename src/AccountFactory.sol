@@ -2,7 +2,7 @@
 pragma solidity ^0.8.19;
 
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
-import {SimpleAccount} from "./SimpleAccount.sol";
+import {SmartAccount} from "./SmartAccount.sol";
 import {IEntryPoint} from "lib/account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {TaskManager} from "./TaskManager.sol";
 
@@ -29,13 +29,13 @@ contract AccountFactory {
     //////////////////////////////////////////////////////////////*/
     error AccountFactory__ContractAlreadyDeployed();
     error AccountFactory__InitializationFailed();
-
+    error  AccountFactory__InvalidEntryPoint();
+    error AccountFactory__InvalidOwner();
     /*CONSTRUCTOR*/
     constructor(address entryPoint, address owner) {
-        if (entryPoint == address(0)) revert("Invalid entry point");
-        if (owner == address(0)) revert("Invalid owner");
-        
-        implementation = address(new SimpleAccount());
+        if (entryPoint == address(0)) revert AccountFactory__InvalidEntryPoint();
+        if (owner == address(0)) revert AccountFactory__InvalidOwner();
+        implementation = address(new SmartAccount());
         i_entryPoint = entryPoint;
         s_owner = owner;
     }
@@ -57,7 +57,7 @@ contract AccountFactory {
         
         emit CloneCreated(account, msg.sender, salt);
         TaskManager taskManager = new TaskManager(account);
-        try SimpleAccount(payable(account)).initialize(msg.sender, i_entryPoint,taskManager) {
+        try SmartAccount(payable(account)).initialize(msg.sender, i_entryPoint,taskManager) {
             return account;
         } catch {
             revert AccountFactory__InitializationFailed();
