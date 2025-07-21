@@ -277,7 +277,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
     fallback() external payable {}
 
-    function supportsInterface(bytes4 interfaceId) external view override returns (bool) {
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
         return
             interfaceId == type(ISmartAccount).interfaceId ||
             interfaceId == type(IERC165).interfaceId;

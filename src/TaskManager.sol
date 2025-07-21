@@ -257,7 +257,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         return s_taskCounters[account];
     }
 
-    function supportsInterface(bytes4 interfaceId) external view override returns (bool) {
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
         return
             interfaceId == type(ITaskManager).interfaceId ||
             interfaceId == type(AutomationCompatibleInterface).interfaceId ||
