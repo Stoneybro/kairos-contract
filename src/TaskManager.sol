@@ -2,86 +2,56 @@
 pragma solidity ^0.8.19;
 
 import {AutomationCompatibleInterface} from "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ISmartAccount} from "./interface/ISmartAccount.sol";
+import {ITaskManager} from "./interface/ITaskManager.sol";
 
-contract TaskManager is AutomationCompatibleInterface, Ownable, ReentrancyGuard {
-    /*//////////////////////////////////////////////////////////////
-                                 TYPES
-    //////////////////////////////////////////////////////////////*/
-    enum TaskStatus {
-        PENDING,
-        COMPLETED,
-        CANCELED,
-        EXPIRED
+contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyGuard {
+    struct TaskIdentifier {
+        address account;
+        uint256 taskId;
     }
 
-    struct Task {
-        uint256 id;
-        string description;
-        uint256 rewardAmount;
-        uint256 deadline;
-        bool valid;
-        TaskStatus status;
-        uint8 choice;
-        uint256 delayDuration;
-        address buddy;
-        bool delayedRewardReleased;
-    }
+    mapping(address => mapping(uint256 => Task)) private s_tasks;
+    mapping(address => uint256) private s_taskCounters;
 
-    /*//////////////////////////////////////////////////////////////
-                            STATE VARIABLES
-    //////////////////////////////////////////////////////////////*/
+    // Pointers to the next task for Chainlink Automation
+    uint256 public s_nextExpiringTaskId;
+    uint256 public s_nextDeadline = type(uint256).max;
+    address public s_nextExpiringTaskAccount;
 
-    mapping(uint256 => Task) private s_tasks;
-    uint256 private s_taskId;
-    uint256 public nextExpiringTaskId;
-    uint256 public nextDeadline = type(uint256).max;
-
-    /*//////////////////////////////////////////////////////////////
-                                 EVENTS
-    //////////////////////////////////////////////////////////////*/
+    // Data structures for finding the next expiring task
+    TaskIdentifier[] private s_pendingTasks;
+    mapping(address => mapping(uint256 => uint256)) private s_pendingTaskIndex;
 
     event TaskCreated(uint256 indexed taskId, string description, uint256 rewardAmount);
     event TaskCompleted(uint256 indexed taskId);
     event TaskCanceled(uint256 indexed taskId);
     event TaskExpired(uint256 indexed taskId);
     event TaskExpiredCallFailure(uint256 indexed taskId);
-    event TaskDelayedPaymentReleased(uint256 indexed taskId,uint256 indexed rewardAmount);
+    event TaskDelayedPaymentReleased(uint256 indexed taskId, uint256 indexed rewardAmount);
 
 
-    /*//////////////////////////////////////////////////////////////
-                                 ERRORS
-    //////////////////////////////////////////////////////////////*/
-    error TaskManager__OnlyOwnerCanCallThisFunction();
-    error TaskManager__TaskRewardPaymentFailed();
-    error TaskManager__TaskAlreadyCompleted();
-    error TaskManager__AddMoreFunds();
-    error TaskManager__TaskHasBeenCanceled();
     error TaskManager__TaskDoesntExist();
-    error TaskManager__TaskHasExpired();
-    error TaskManager__TaskNotYetExpired();
-    error TaskManager__ExpiredTaskCallBackFailed();
-    error TaskManager__ReleaseDelayedPaymentFailed();
     error TaskManager__EmptyDescription();
     error TaskManager__RewardAmountMustBeGreaterThanZero();
-    error TaskManager__InvalidDeadline();
     error TaskManager__InvalidPenaltyConfig();
+    error TaskManager__TaskAlreadyCompleted();
+    error TaskManager__TaskHasBeenCanceled();
+    error TaskManager__TaskHasExpired();
+    error TaskManager__TaskNotYetExpired();
+    error TaskManager__InvalidChoice();
 
-    /*CONSTRUCTOR*/
-    constructor(address owner) Ownable(owner) {}
 
-    /*MODIFIERS*/
-    modifier taskExist(uint256 taskId) {
-        if (taskId >= s_taskId) {
+    constructor() {}
+
+    modifier taskExist(address account, uint256 taskId) {
+        if (taskId >= s_taskCounters[account]) {
             revert TaskManager__TaskDoesntExist();
         }
         _;
     }
-
-    /*//////////////////////////////////////////////////////////////
-                               FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
 
     function createTask(
         string calldata description,
@@ -90,7 +60,8 @@ contract TaskManager is AutomationCompatibleInterface, Ownable, ReentrancyGuard 
         uint8 choice,
         uint256 delayDuration,
         address buddy
-    ) external onlyOwner returns (uint256, bool) {
+    ) external override returns (uint256) {
+        address account = msg.sender;
         if (bytes(description).length == 0) {
             revert TaskManager__EmptyDescription();
         }
@@ -100,14 +71,22 @@ contract TaskManager is AutomationCompatibleInterface, Ownable, ReentrancyGuard 
         if (choice == 2 && buddy == address(0)) {
             revert TaskManager__InvalidPenaltyConfig();
         }
-        uint256 deadline = block.timestamp + deadlineInSeconds;
+        if (choice == 1 && delayDuration == 0) {
+            revert TaskManager__InvalidPenaltyConfig();
+        }
+        if (choice > 2 || choice == 0) {
+            revert TaskManager__InvalidChoice();
+        }
 
-        s_tasks[s_taskId] = Task({
-            id: s_taskId,
+        uint256 deadline = block.timestamp + deadlineInSeconds;
+        uint256 newTaskId = s_taskCounters[account];
+
+        s_tasks[account][newTaskId] = Task({
+            id: newTaskId,
             description: description,
             rewardAmount: rewardAmount,
             deadline: deadline,
-            valid: true, 
+            valid: true,
             status: TaskStatus.PENDING,
             choice: choice,
             delayDuration: delayDuration,
@@ -115,203 +94,173 @@ contract TaskManager is AutomationCompatibleInterface, Ownable, ReentrancyGuard 
             delayedRewardReleased: false
         });
 
-        if (deadline < nextDeadline) {
-            nextExpiringTaskId = s_taskId;
-            nextDeadline = deadline;
+        // Add to pending tasks list for upkeep
+        uint256 pendingIndex = s_pendingTasks.length;
+        s_pendingTasks.push(TaskIdentifier(account, newTaskId));
+        s_pendingTaskIndex[account][newTaskId] = pendingIndex;
+
+        if (deadline < s_nextDeadline) {
+            s_nextExpiringTaskAccount = account;
+            s_nextExpiringTaskId = newTaskId;
+            s_nextDeadline = deadline;
         }
 
-        emit TaskCreated(s_taskId, description, rewardAmount);
-        uint256 currentTaskId = s_taskId;
-        s_taskId++;
-        return (currentTaskId, true);
+        emit TaskCreated(newTaskId, description, rewardAmount);
+        s_taskCounters[account]++;
+        return newTaskId;
     }
 
     function checkUpkeep(bytes calldata) public view override returns (bool upkeepNeeded, bytes memory performData) {
-        uint256[] memory expiredTaskIds = new uint256[](s_taskId);
-        uint256 count = 0;
-
-        for (uint256 i = 0; i < s_taskId; i++) {
-            Task storage task = s_tasks[i];
-            if (task.valid && task.status == TaskStatus.PENDING && block.timestamp > task.deadline) {
-                expiredTaskIds[count] = i;
-                count++;
-            }
-        }
-        upkeepNeeded = count > 0;
-        if (upkeepNeeded) {
-           
-            uint256[] memory validExpiredTaskIds = new uint256[](count);
-            for (uint256 i = 0; i < count; i++) {
-                validExpiredTaskIds[i] = expiredTaskIds[i];
-            }
-            performData = abi.encode(validExpiredTaskIds, count);
-        } else {
-            upkeepNeeded = false;
-            performData = "";
-        }
+        upkeepNeeded = (s_nextExpiringTaskAccount != address(0) && block.timestamp > s_nextDeadline);
+        performData = abi.encode(s_nextExpiringTaskAccount, s_nextExpiringTaskId);
     }
 
     function performUpkeep(bytes calldata performData) external override {
-        (uint256[] memory expiredTaskIds, uint256 count) = abi.decode(performData, (uint256[], uint256));
+        (address account, uint256 taskId) = abi.decode(performData, (address, uint256));
 
-        for (uint256 i = 0; i < count; i++) {
-            uint256 taskId = expiredTaskIds[i];
-            Task storage task = s_tasks[taskId];
+        if (account != s_nextExpiringTaskAccount || taskId != s_nextExpiringTaskId) {
+            return;
+        }
 
-            if (task.valid && task.status == TaskStatus.PENDING && block.timestamp > task.deadline) {
-                s_tasks[taskId].status = TaskStatus.EXPIRED;
+        Task storage task = s_tasks[account][taskId];
 
-                emit TaskExpired(taskId);
+        if (block.timestamp > task.deadline && task.status == TaskStatus.PENDING) {
+            task.status = TaskStatus.EXPIRED;
+            emit TaskExpired(taskId);
 
-                (bool success,) = payable(owner()).call(abi.encodeWithSignature("expiredTaskCallback(uint256)", taskId));
+            try ISmartAccount(account).expiredTaskCallback(taskId) {
+                // Call was successful, no action needed.
+            } catch {
+                emit TaskExpiredCallFailure(taskId);
+            }
+            
+            _removeTaskFromPendingList(account, taskId);
+            _findNextExpiringTask();
+        }
+    }
 
-                if (!success) {
-                    emit TaskExpiredCallFailure(taskId);
-                }
+    function _findNextExpiringTask() internal nonReentrant {
+        uint256 minDeadline = type(uint256).max;
+        address nextAccount;
+        uint256 nextTaskId;
+
+        // This loop can be gas-intensive if there are many pending tasks.
+        // For a production system, consider limiting the number of pending tasks.
+        for (uint i = 0; i < s_pendingTasks.length; i++) {
+            TaskIdentifier memory identifier = s_pendingTasks[i];
+            Task storage task = s_tasks[identifier.account][identifier.taskId];
+
+            // The check for PENDING status is redundant if list is managed correctly,
+            // but it's a good safeguard.
+            if (task.status == TaskStatus.PENDING && task.deadline < minDeadline) {
+                minDeadline = task.deadline;
+                nextAccount = identifier.account;
+                nextTaskId = identifier.taskId;
             }
         }
 
-        _updateNextExpiringTask();
+        s_nextDeadline = minDeadline;
+        s_nextExpiringTaskAccount = nextAccount;
+        s_nextExpiringTaskId = nextTaskId;
     }
 
-    function expireTask(uint256 taskId) external onlyOwner taskExist(taskId) {
-        Task storage task = s_tasks[taskId];
-
-        if (!task.valid) {
-            revert TaskManager__TaskDoesntExist();
-        }
-        if (block.timestamp <= task.deadline) {
-            revert TaskManager__TaskNotYetExpired();
-        }
-        if (task.status == TaskStatus.EXPIRED) {
-            revert TaskManager__TaskHasExpired();
+    function completeTask(uint256 taskId) external override taskExist(msg.sender, taskId) {
+        Task storage task = s_tasks[msg.sender][taskId];
+        if (task.status == TaskStatus.COMPLETED) {
+            revert TaskManager__TaskAlreadyCompleted();
         }
         if (task.status != TaskStatus.PENDING) {
             revert TaskManager__TaskHasBeenCanceled();
         }
-
-        s_tasks[taskId].status = TaskStatus.EXPIRED;
-        if (taskId == nextExpiringTaskId) {
-            _updateNextExpiringTask();
-        }
-
-        emit TaskExpired(taskId);
-    }
-
-    function completeTask(uint256 taskId) external taskExist(taskId) onlyOwner {
-        Task storage task = s_tasks[taskId];
-
-        if (!task.valid) {
-            revert TaskManager__TaskDoesntExist();
-        }
-        if (task.status == TaskStatus.EXPIRED) {
-            revert TaskManager__TaskHasExpired();
-        }
-        if (task.status == TaskStatus.COMPLETED) {
-            revert TaskManager__TaskAlreadyCompleted();
-        }
-        if (task.status == TaskStatus.CANCELED) {
-            revert TaskManager__TaskHasBeenCanceled();
-        }
-
-        s_tasks[taskId].status = TaskStatus.COMPLETED;
+        task.status = TaskStatus.COMPLETED;
         emit TaskCompleted(taskId);
 
-        if (taskId == nextExpiringTaskId) {
-            _updateNextExpiringTask();
+        if (msg.sender == s_nextExpiringTaskAccount && taskId == s_nextExpiringTaskId) {
+            _removeTaskFromPendingList(msg.sender, taskId);
+            _findNextExpiringTask();
         }
     }
 
-    function cancelTask(uint256 taskId) external taskExist(taskId) onlyOwner {
-        Task storage task = s_tasks[taskId];
-
-        if (!task.valid) {
-            revert TaskManager__TaskDoesntExist();
-        }
-        if (task.status == TaskStatus.COMPLETED) {
-            revert TaskManager__TaskAlreadyCompleted();
-        }
+    function cancelTask(uint256 taskId) external override taskExist(msg.sender, taskId) {
+        Task storage task = s_tasks[msg.sender][taskId];
         if (task.status == TaskStatus.CANCELED) {
             revert TaskManager__TaskHasBeenCanceled();
         }
-        if (task.status == TaskStatus.EXPIRED) {
-            revert TaskManager__TaskHasExpired();
+        if (task.status != TaskStatus.PENDING) {
+            revert TaskManager__TaskAlreadyCompleted();
         }
-        s_tasks[taskId].status = TaskStatus.CANCELED;
-        if (taskId == nextExpiringTaskId) {
-            _updateNextExpiringTask();
-        }
-
+        task.status = TaskStatus.CANCELED;
         emit TaskCanceled(taskId);
+
+        if (msg.sender == s_nextExpiringTaskAccount && taskId == s_nextExpiringTaskId) {
+            _removeTaskFromPendingList(msg.sender, taskId);
+            _findNextExpiringTask();
+        }
     }
 
-    function releaseDelayedPayment(uint256 taskId) external taskExist(taskId) onlyOwner {
-        Task storage task = s_tasks[taskId];
-        if (!task.valid) {
-            revert TaskManager__TaskDoesntExist();
+    function _removeTaskFromPendingList(address account, uint256 taskId) internal {
+        uint256 indexToRemove = s_pendingTaskIndex[account][taskId];
+        uint256 lastIndex = s_pendingTasks.length - 1;
+
+        // We use the swap-and-pop trick for O(1) removal
+        if (indexToRemove != lastIndex) {
+            TaskIdentifier memory lastIdentifier = s_pendingTasks[lastIndex];
+            s_pendingTasks[indexToRemove] = lastIdentifier;
+
+            // Update the index of the element that was moved
+            s_pendingTaskIndex[lastIdentifier.account][lastIdentifier.taskId] = indexToRemove;
         }
-        if (block.timestamp <= task.deadline+task.delayDuration) {
+
+        // Remove the last element
+        s_pendingTasks.pop();
+
+        // Clean up the index mapping for the removed task
+        delete s_pendingTaskIndex[account][taskId];
+    }
+    
+    function releaseDelayedPayment(uint256 taskId) external override taskExist(msg.sender, taskId) {
+        Task storage task = s_tasks[msg.sender][taskId];
+        if (task.status != TaskStatus.EXPIRED) {
             revert TaskManager__TaskNotYetExpired();
         }
-        if (task.status!=TaskStatus.EXPIRED) {
-            revert TaskManager__TaskNotYetExpired();
-        }
-        if (task.choice!=1) {
+        if (task.choice != 1) { // PENALTY_DELAYEDPAYMENT
             revert TaskManager__InvalidPenaltyConfig();
         }
-        task.delayedRewardReleased=true;
-        emit TaskDelayedPaymentReleased(taskId,task.rewardAmount);
+        task.delayedRewardReleased = true;
+        emit TaskDelayedPaymentReleased(taskId, task.rewardAmount);
     }
 
-    function _updateNextExpiringTask() internal nonReentrant {
-        uint256 soonestDeadline = type(uint256).max;
-        uint256 soonestTaskId = 0;
-        bool foundPendingTask = false;
-
-        for (uint256 i = 0; i < s_taskId; i++) {
-            Task storage task = s_tasks[i];
-            if (task.valid && task.status == TaskStatus.PENDING && task.deadline < soonestDeadline) {
-                soonestDeadline = task.deadline;
-                soonestTaskId = i;
-                foundPendingTask = true;
-            }
+    function getTask(address account, uint256 taskId) external view override taskExist(account,taskId) returns (Task memory) {
+        return s_tasks[account][taskId];
+    }
+    
+    function getAllTasks(address account, uint256 cursor, uint256 pageSize) external view override returns (Task[] memory tasks, uint256 nextCursor) {
+        uint256 taskCount = s_taskCounters[account];
+        if (cursor >= taskCount) {
+            return (new Task[](0), taskCount);
         }
 
-        if (foundPendingTask) {
-            nextExpiringTaskId = soonestTaskId;
-            nextDeadline = soonestDeadline;
-        } else {
-            nextExpiringTaskId = 0;
-            nextDeadline = type(uint256).max;
+        uint256 end = cursor + pageSize;
+        if (end > taskCount) {
+            end = taskCount;
         }
+
+        uint256 length = end - cursor;
+        tasks = new Task[](length);
+        for (uint256 i = 0; i < length; i++) {
+            tasks[i] = s_tasks[account][cursor + i];
+        }
+        return (tasks, end);
     }
 
-    function getTask(uint256 taskId) external view taskExist(taskId) returns (Task memory) {
-        Task memory task = s_tasks[taskId];
-        if (!task.valid) {
-            revert TaskManager__TaskDoesntExist();
-        }
-        return task;
+    function getTotalTasks(address account) external view override returns (uint256) {
+        return s_taskCounters[account];
     }
 
-    function getAllTasks() external view returns (Task[] memory) {
-        Task[] memory tasks = new Task[](s_taskId);
-        for (uint256 i = 0; i < s_taskId; i++) {
-            tasks[i] = s_tasks[i];
-        }
-        return tasks;
-    }
-
-    function getTotalTasks() external view returns (uint256) {
-        return s_taskId;
-    }
-
-    function isValidTask(uint256 taskId) external view returns (bool) {
-        if (taskId >= s_taskId) {
-            return false;
-        }
-        return s_tasks[taskId].valid;
+    function supportsInterface(bytes4 interfaceId) external view override returns (bool) {
+        return
+            interfaceId == type(ITaskManager).interfaceId ||
+            interfaceId == type(AutomationCompatibleInterface).interfaceId ||
+            interfaceId == type(IERC165).interfaceId;
     }
 }
-
-

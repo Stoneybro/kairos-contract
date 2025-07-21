@@ -1,39 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {IAccount} from "lib/account-abstraction/contracts/interfaces/IAccount.sol";
+import {IAccount} from "@account-abstraction/contracts/interfaces/IAccount.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import {PackedUserOperation} from "lib/account-abstraction/contracts/interfaces/PackedUserOperation.sol";
+import {PackedUserOperation} from "@account-abstraction/contracts/interfaces/PackedUserOperation.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {SIG_VALIDATION_FAILED, SIG_VALIDATION_SUCCESS} from "lib/account-abstraction/contracts/core/Helpers.sol";
-import {IEntryPoint} from "lib/account-abstraction/contracts/interfaces/IEntryPoint.sol";
-import {TaskManager} from "./TaskManager.sol";
+import {SIG_VALIDATION_FAILED, SIG_VALIDATION_SUCCESS} from "@account-abstraction/contracts/core/Helpers.sol";
+import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
+import {ITaskManager} from "./interface/ITaskManager.sol";
+import {ISmartAccount} from "./interface/ISmartAccount.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/**
- * @title Account model for users.
- * @author Livingstone zion
- * @notice This is the initial account model deployed by the Account Factory
- */
-contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
-    /*//////////////////////////////////////////////////////////////
-                                 TYPES
-    //////////////////////////////////////////////////////////////*/
-
-    /*//////////////////////////////////////////////////////////////
-                            STATE VARIABLES
-    //////////////////////////////////////////////////////////////*/
-
+contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard {
     address public s_owner;
-    TaskManager public taskManager;
+    ITaskManager public taskManager;
     IEntryPoint private i_entryPoint;
     uint256 public s_totalCommittedReward;
     uint8 constant PENALTY_DELAYEDPAYMENT = 1;
     uint8 constant PENALTY_SENDBUDDY = 2;
-    /*//////////////////////////////////////////////////////////////
-                                 EVENTS
-    //////////////////////////////////////////////////////////////*/
 
     event TaskCreated(uint256 indexed taskId, string description, uint256 rewardAmount);
     event TaskCompleted(uint256 indexed taskId);
@@ -44,25 +30,17 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
     event PenaltyFundsReleasedToBuddy(uint256 indexed taskId, uint256 indexed rewardAmount, address indexed buddy);
     event Transferred(address indexed to, uint256 amount);
 
-    /*//////////////////////////////////////////////////////////////
-                                 ERRORS
-    //////////////////////////////////////////////////////////////*/
-
     error SmartAccount__OnlyOwnerCanCall();
     error SmartAccount__NotFromEntryPoint();
     error SmartAccount__ExecutionFailed(bytes result);
-    error SmartAccount__TaskManagerAlreadyDeployed();
     error SmartAccount__AddMoreFunds();
-    error SmartAccount__TaskCreationFailed();
     error SmartAccount__TaskRewardPaymentFailed();
     error SmartAccount__OnlyTaskManagerCanCall();
     error SmartAccount__PenaltyDurationNotElapsed();
     error SmartAccount__PenaltyTypeMismatch();
     error SmartAccount__PayPrefundFailed();
-    error SmartAccount__UnlinkCurrentTaskManager();
     error SmartAccount__PickAPenalty();
     error SmartAccount__InvalidPenaltyChoice();
-    error SmartAccount__TaskManagerNotLinked();
     error SmartAccount__NoTaskManagerLinked();
     error SmartAccount__CannotWithdrawCommittedRewards();
     error SmartAccount__TransferFailed();
@@ -74,19 +52,12 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
     error SmartAccount__InvalidPenaltyConfig();
     error SmartAccount__RewardCannotBeZero();
     error SmartAccount__TaskAlreadyCanceled();
-    /*//////////////////////////////////////////////////////////////
-                               INITIALIZER
-    //////////////////////////////////////////////////////////////*/
 
-    function initialize(address owner, address entryPoint, TaskManager _taskManager) external initializer {
+    function initialize(address owner, address entryPoint, ITaskManager _taskManager) external initializer {
         s_owner = owner;
         i_entryPoint = IEntryPoint(entryPoint);
         taskManager = _taskManager;
     }
-
-    /*//////////////////////////////////////////////////////////////
-                               MODIFIERS
-    //////////////////////////////////////////////////////////////*/
 
     modifier requireFromEntryPoint() {
         if (msg.sender != address(i_entryPoint)) {
@@ -116,9 +87,6 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
         _;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           ACCOUNT FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
     receive() external payable {}
 
     function execute(address dest, uint256 value, bytes calldata functionData)
@@ -139,16 +107,13 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
         if (value > (address(this).balance - s_totalCommittedReward)) {
             revert SmartAccount__CannotWithdrawCommittedRewards();
         }
-        (bool success,) = destination.call{value: value}("");
+        (bool success, ) = destination.call{value: value}("");
         if (!success) {
             revert SmartAccount__TransferFailed();
         }
         emit Transferred(destination, value);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           ENTRY POINT SECTION
-    //////////////////////////////////////////////////////////////*/
     function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
         external
         requireFromEntryPoint
@@ -174,24 +139,13 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
 
     function _payPrefund(uint256 missingAccountFunds) internal {
         if (missingAccountFunds != 0) {
-            (bool success,) = payable(address(i_entryPoint)).call{value: missingAccountFunds}("");
+            (bool success, ) = payable(address(i_entryPoint)).call{value: missingAccountFunds}("");
             if (!success) {
                 revert SmartAccount__PayPrefundFailed();
             }
         }
     }
 
-    /*//////////////////////////////////////////////////////////////
-                          TASK MANAGER SECTION
-    //////////////////////////////////////////////////////////////*/
-
-    function getTaskManagerAddress() external view returns (address) {
-        return address(taskManager);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                             TASK ACTIONS
-    //////////////////////////////////////////////////////////////*/
     function createTask(
         string calldata description,
         uint256 rewardAmount,
@@ -215,26 +169,27 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
         if (rewardAmount == 0) {
             revert SmartAccount__RewardCannotBeZero();
         }
-        (uint256 taskId, bool valid) =
+        uint256 taskId =
             taskManager.createTask(description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy);
-        if (!valid) {
-            revert SmartAccount__TaskCreationFailed();
-        }
 
         s_totalCommittedReward += rewardAmount;
         emit TaskCreated(taskId, description, rewardAmount);
     }
 
     function completeTask(uint256 taskId) external onlyOwner taskManagerLinked nonReentrant {
-        TaskManager.Task memory task = taskManager.getTask(taskId);
-        if (task.status == TaskManager.TaskStatus.COMPLETED) {
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
+        if (task.status == ITaskManager.TaskStatus.COMPLETED) {
             revert SmartAccount__TaskAlreadyCompleted();
         }
+        if (task.status == ITaskManager.TaskStatus.CANCELED) {
+            revert SmartAccount__TaskAlreadyCanceled();
+        }
+
         taskManager.completeTask(taskId);
 
         if (task.rewardAmount > 0) {
             s_totalCommittedReward -= task.rewardAmount;
-            (bool success,) = payable(msg.sender).call{value: task.rewardAmount}("");
+            (bool success, ) = payable(s_owner).call{value: task.rewardAmount}("");
             if (!success) {
                 revert SmartAccount__TaskRewardPaymentFailed();
             }
@@ -244,8 +199,8 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
     }
 
     function cancelTask(uint256 taskId) external onlyOwner taskManagerLinked {
-        TaskManager.Task memory task = taskManager.getTask(taskId);
-        if (task.status == TaskManager.TaskStatus.CANCELED) {
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
+        if (task.status == ITaskManager.TaskStatus.CANCELED) {
             revert SmartAccount__TaskAlreadyCanceled();
         }
         taskManager.cancelTask(taskId);
@@ -253,30 +208,26 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
         emit TaskCanceled(taskId);
     }
 
-    function getTask(uint256 taskId) external view taskManagerLinked returns (TaskManager.Task memory) {
-        return taskManager.getTask(taskId);
+    function getTask(uint256 taskId) external view taskManagerLinked returns (ITaskManager.Task memory) {
+        return taskManager.getTask(address(this), taskId);
     }
 
     function getTotalTasks() external view taskManagerLinked returns (uint256) {
-        return taskManager.getTotalTasks();
+        return taskManager.getTotalTasks(address(this));
     }
 
-    function getAllTasks() external view taskManagerLinked returns (TaskManager.Task[] memory) {
-        return taskManager.getAllTasks();
+    function getAllTasks(uint256 cursor, uint256 pageSize) external view taskManagerLinked returns (ITaskManager.Task[] memory, uint256) {
+        return taskManager.getAllTasks(address(this), cursor, pageSize);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                         PENALTY MECHANISMS
-    //////////////////////////////////////////////////////////////*/
-
-    function expiredTaskCallback(uint256 taskId) external nonReentrant {
+    function expiredTaskCallback(uint256 taskId) external override nonReentrant {
         if (msg.sender != address(taskManager)) {
             revert SmartAccount__OnlyTaskManagerCanCall();
         }
 
-        TaskManager.Task memory task = taskManager.getTask(taskId);
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
 
-        if (task.status != TaskManager.TaskStatus.EXPIRED) {
+        if (task.status != ITaskManager.TaskStatus.EXPIRED) {
             revert SmartAccount__TaskNotExpired();
         }
 
@@ -286,9 +237,8 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
             if (task.buddy == address(0)) {
                 revert SmartAccount__PickAPenalty();
             }
-
             s_totalCommittedReward -= task.rewardAmount;
-            (bool success,) = payable(task.buddy).call{value: task.rewardAmount}("");
+            (bool success, ) = payable(task.buddy).call{value: task.rewardAmount}("");
             if (!success) {
                 revert SmartAccount__TaskRewardPaymentFailed();
             }
@@ -300,36 +250,24 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
         emit TaskExpired(taskId);
     }
 
-    function expireTask(uint256 taskId) external onlyOwner taskManagerLinked {
-        taskManager.expireTask(taskId);
-        emit TaskExpired(taskId);
-    }
-
     function releaseDelayedPayment(uint256 taskId) external onlyOwner taskManagerLinked nonReentrant {
-        TaskManager.Task memory task = taskManager.getTask(taskId);
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
         if (task.choice != PENALTY_DELAYEDPAYMENT) {
             revert SmartAccount__PenaltyTypeMismatch();
         }
-        if (task.status != TaskManager.TaskStatus.EXPIRED) {
+        if (task.status != ITaskManager.TaskStatus.EXPIRED) {
             revert SmartAccount__TaskNotExpired();
         }
         if (block.timestamp <= task.deadline + task.delayDuration) {
             revert SmartAccount__PenaltyDurationNotElapsed();
         }
-        uint256 releaseTime = task.deadline + task.delayDuration;
-        if (block.timestamp < releaseTime) {
-            revert SmartAccount__PenaltyDurationNotElapsed();
-        }
-
-        if (s_totalCommittedReward < task.rewardAmount) {
-            revert SmartAccount__InsufficientCommittedReward();
-        }
         if (task.delayedRewardReleased) {
             revert SmartAccount__PaymentAlreadyReleased();
         }
+        
         taskManager.releaseDelayedPayment(taskId);
         s_totalCommittedReward -= task.rewardAmount;
-        (bool success,) = payable(s_owner).call{value: task.rewardAmount}("");
+        (bool success, ) = payable(s_owner).call{value: task.rewardAmount}("");
         if (!success) {
             revert SmartAccount__TaskRewardPaymentFailed();
         }
@@ -337,8 +275,11 @@ contract SmartAccount is Initializable, IAccount, ReentrancyGuard {
         emit DelayedPaymentReleased(taskId, task.rewardAmount);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                                FALLBACK
-    //////////////////////////////////////////////////////////////*/
     fallback() external payable {}
+
+    function supportsInterface(bytes4 interfaceId) external view override returns (bool) {
+        return
+            interfaceId == type(ISmartAccount).interfaceId ||
+            interfaceId == type(IERC165).interfaceId;
+    }
 }
