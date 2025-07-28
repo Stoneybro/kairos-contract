@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import {UserOperation} from "@account-abstraction/contracts/interfaces/UserOperation.sol";
 import {IAccount} from "@account-abstraction/contracts/interfaces/IAccount.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import {PackedUserOperation} from "@account-abstraction/contracts/interfaces/PackedUserOperation.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {SIG_VALIDATION_FAILED, SIG_VALIDATION_SUCCESS} from "@account-abstraction/contracts/core/Helpers.sol";
+import {_packValidationData} from "@account-abstraction/contracts/core/Helpers.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
 import {ITaskManager} from "./interface/ITaskManager.sol";
 import {ISmartAccount} from "./interface/ISmartAccount.sol";
@@ -114,7 +114,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         emit Transferred(destination, value);
     }
 
-    function validateUserOp(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
+    function validateUserOp(UserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
         external
         requireFromEntryPoint
         returns (uint256 validationData)
@@ -123,7 +123,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         _payPrefund(missingAccountFunds);
     }
 
-    function _validateSignature(PackedUserOperation calldata userOp, bytes32 userOpHash)
+    function _validateSignature(UserOperation calldata userOp, bytes32 userOpHash)
         internal
         view
         returns (uint256 validationData)
@@ -131,9 +131,11 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(userOpHash);
         address signer = ECDSA.recover(ethSignedMessageHash, userOp.signature);
         if (signer != s_owner) {
-            return SIG_VALIDATION_FAILED;
+            // Return 1 for signature failure
+            return _packValidationData(true, 0, 0);
         } else {
-            return SIG_VALIDATION_SUCCESS;
+            // Return 0 for signature success
+            return _packValidationData(false, 0, 0);
         }
     }
 
@@ -216,8 +218,8 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         return taskManager.getTotalTasks(address(this));
     }
 
-    function getAllTasks(uint256 cursor, uint256 pageSize) external view taskManagerLinked returns (ITaskManager.Task[] memory, uint256) {
-        return taskManager.getAllTasks(address(this), cursor, pageSize);
+    function getAllTasks() external view taskManagerLinked returns (ITaskManager.Task[] memory) {
+        return taskManager.getAllTasks(address(this));
     }
 
     function expiredTaskCallback(uint256 taskId) external override nonReentrant {

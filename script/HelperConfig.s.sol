@@ -11,6 +11,7 @@ contract HelperConfig is Script {
     struct NetworkConfig {
         address entryPoint;
         address account;
+        address taskManager;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -59,11 +60,11 @@ contract HelperConfig is Script {
     }
 
     function getSepoliaEthConfig() public pure returns (NetworkConfig memory) {
-        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: BURNER_WALLET});
+        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: BURNER_WALLET,taskManager:0x43e0BC90661dAF20C6fFbae1079d6E07E88e403A});
     }
 
     function getBaseSepoliaEthConfig() public pure returns (NetworkConfig memory) {
-        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: SEPOLIA_WALLET});
+        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: SEPOLIA_WALLET,taskManager:0x43e0BC90661dAF20C6fFbae1079d6E07E88e403A});
     }
 
     function getAnvilEthConfig() public returns (NetworkConfig memory) {
@@ -76,7 +77,7 @@ contract HelperConfig is Script {
 
         EntryPoint entryPoint = new EntryPoint();
 
-        localNetwork = NetworkConfig({entryPoint: address(entryPoint), account: signingAccount});
+        localNetwork = NetworkConfig({entryPoint: address(entryPoint), account: signingAccount, taskManager: 0x5FbDB2315678afecb367f032d93F642f64180aa3});
 
         return localNetwork;
     }

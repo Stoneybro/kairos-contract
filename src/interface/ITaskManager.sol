@@ -32,6 +32,6 @@ interface ITaskManager is IERC165 {
     function cancelTask(uint256 taskId) external;
     function releaseDelayedPayment(uint256 taskId) external;
     function getTask(address account, uint256 taskId) external view returns (Task memory);
-    function getAllTasks(address account, uint256 cursor, uint256 pageSize) external view returns (Task[] memory tasks, uint256 nextCursor);
+    function getAllTasks(address account) external view returns (Task[] memory tasks);
     function getTotalTasks(address account) external view returns (uint256);
 }

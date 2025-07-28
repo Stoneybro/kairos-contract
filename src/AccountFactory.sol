@@ -69,4 +69,12 @@ contract AccountFactory {
     function getImplementation() external view returns (address) {
         return implementation;
     }
+    function getEntryPoint() external view returns (address) {
+        return i_entryPoint;
+    }
+    function getTaskManager() external view returns (address) {
+        return address(i_taskManager);
+    }
+
+
 }
