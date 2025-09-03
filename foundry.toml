@@ -2,9 +2,21 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-remappings=["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/","@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/"]
+optimizer = true
+optimizer_runs = 200 
+evm_version = "shanghai"
+solc_version = "0.8.28"
+remappings = [
+    "@openzeppelin/contracts/security/ReentrancyGuard.sol=lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
+    "@account-abstraction/contracts/=lib/account-abstraction/contracts/"
+]
 [invariant]
 runs = 64
 depth = 64
 fail_on_revert = false
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[etherscan]
+base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api" }

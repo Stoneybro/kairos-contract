@@ -1,472 +1,711 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {AccountFactory} from "src/AccountFactory.sol";
 import {Script, console} from "forge-std/Script.sol";
-import {HelperConfig} from "script/HelperConfig.s.sol";
-import {MessageHashUtils} from "lib/openzeppelin-contracts/contracts/utils/cryptography/MessageHashUtils.sol";
-import {PackedUserOperation} from "lib/account-abstraction/contracts/interfaces/PackedUserOperation.sol";
-import {IEntryPoint} from "lib/account-abstraction/contracts/interfaces/IEntryPoint.sol";
-import {SimpleAccount} from "src/SimpleAccount.sol";
+import {SmartAccount} from "../src/SmartAccount.sol";
+import {TaskManager} from "../src/TaskManager.sol";
+import {AccountFactory} from "../src/AccountFactory.sol";
+import {ITaskManager} from "../src/interface/ITaskManager.sol";
+import {ISmartAccount} from "../src/interface/ISmartAccount.sol";
 
-/**
- * @title Complete Flow Test Script
- * @notice Tests the entire user journey from account creation to task management
- */
-contract CompleteFlowTest is Script {
-    using MessageHashUtils for bytes32;
-    
-    // Configuration
-    HelperConfig.NetworkConfig config;
-    AccountFactory factory;
-    SimpleAccount smartAccount;
-    address owner;
-    uint256 ownerPrivateKey;
-    
+contract InteractionScript is Script {
+    // Constants for penalty types
+    uint8 constant PENALTY_DELAYEDPAYMENT = 1;
+    uint8 constant PENALTY_SENDBUDDY = 2;
+
+    // Contract addresses (update these after deployment)
+    address public taskManager;
+    address public accountFactory;
+    address public entryPoint;
+
+    // Test addresses and accounts
+    address public owner;
+    address public buddy;
+    address public testAccount1;
+    address public testAccount2;
+    address public testAccount3;
+
+    // Task IDs for tracking
+    uint256 public delayedPaymentTaskId;
+    uint256 public buddyPenaltyTaskId;
+    uint256 public completionTaskId;
+    uint256 public cancellationTaskId;
+
     function setUp() public {
-        // Set up configuration
-        HelperConfig configHelper = new HelperConfig();
-        config = configHelper.getConfig();
-        
-        // Use different accounts for different networks
-        if (block.chainid == 31337) { // Anvil
-            ownerPrivateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80; // Anvil account[0]
-            owner = vm.addr(ownerPrivateKey);
-        } else {
-            ownerPrivateKey = vm.envUint("PRIVATE_KEY");
-            owner = vm.addr(ownerPrivateKey);
-        }
-        
-        console.log("Owner address:", owner);
-        console.log("EntryPoint address:", config.entryPoint);
+        owner = vm.addr(1);
+        buddy = vm.addr(2);
     }
-    
-    function run() external {
-        setUp();
-        
-        console.log("=== Starting Complete Flow Test ===");
-        
-        // Step 1: Deploy AccountFactory (if not already deployed)
-        address factoryAddr = deployAccountFactory();
-        
-        // Step 2: Create Smart Account
-        address accountAddr = createSmartAccount(factoryAddr);
-        
-        // Step 3: Fund the account
-        fundAccount(accountAddr);
-        
-        // Step 4: Deploy and link TaskManager
-        deployTaskManager(accountAddr);
-        
-        // Step 5: Set penalty mechanism
-        setPenaltyMechanism(accountAddr);
-        
-        // Step 6: Create tasks
-        createTasks(accountAddr);
-        
-        // Step 7: Complete a task
-        completeTask(accountAddr, 0);
-        
-        // Step 8: Let a task expire and test penalty
-        testTaskExpiry(accountAddr);
-        
-        console.log("=== Complete Flow Test Finished ===");
+
+    function run() public {
+        vm.deal(address(this), 100 ether); // Fund the script address
+        console.log("=== COMPREHENSIVE TASKMANAGER SYSTEM TEST ===");
+        console.log("Testing all functionality...\n");
+
+        // Step 1: Deploy all contracts
+        console.log("1. DEPLOYING CONTRACTS");
+        deployContracts();
+        console.log(" All contracts deployed successfully\n");
+
+        // Step 2: Create multiple accounts for testing
+        console.log("2. CREATING TEST ACCOUNTS");
+        createTestAccounts();
+        console.log(" Test accounts created and funded\n");
+
+        // Step 3: Test task creation with both penalty types
+        console.log("3. TESTING TASK CREATION");
+        TaskCreation();
+        console.log(" All task types created successfully\n");
+
+        // Step 4: Test task completion flow
+        console.log("4. TESTING TASK COMPLETION");
+        TaskCompletion();
+        console.log(" Task completion tested\n");
+
+        // Step 5: Test task cancellation
+        console.log("5. TESTING TASK CANCELLATION");
+        TaskCancellation();
+        console.log(" Task cancellation tested\n");
+
+        // Step 6: Test fund management
+        console.log("6. TESTING FUND MANAGEMENT");
+        FundManagement();
+        console.log(" Fund management tested\n");
+
+        // Step 7: Test edge cases and error conditions
+        console.log("7. TESTING EDGE CASES");
+        EdgeCases();
+        console.log(" Edge cases tested\n");
+
+        // Step 8: Final state verification
+        console.log("8. FINAL STATE VERIFICATION");
+        verifyFinalState();
+        console.log(" Final state verified\n");
+
+        console.log(" ALL TESTS COMPLETED SUCCESSFULLY!");
+        console.log("========================================");
     }
-    
-    function deployAccountFactory() internal returns (address) {
-        console.log("\n--- Step 1: Deploying Account Factory ---");
-        
-        vm.startBroadcast(ownerPrivateKey);
-        factory = new AccountFactory(config.entryPoint, owner);
-        vm.stopBroadcast();
-        
-        console.log("AccountFactory deployed at:", address(factory));
-        return address(factory);
+
+    function deployContracts() internal {
+        console.log("=== Deploying Contracts ===");
+
+        entryPoint = vm.addr(999);
+        console.log("Using mock EntryPoint:", entryPoint);
+
+        taskManager = deployTaskManager();
+        accountFactory = deployAccountFactory(entryPoint, owner, taskManager);
+
+        console.log("All contracts deployed successfully!");
     }
-    
-    function createSmartAccount(address factoryAddr) internal returns (address) {
-        console.log("\n--- Step 2: Creating Smart Account ---");
-        
-        factory = AccountFactory(factoryAddr);
-        uint256 nonce = 0;
-        
-        vm.startBroadcast(ownerPrivateKey);
-        address accountAddr = factory.createAccount(nonce);
-        vm.stopBroadcast();
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        console.log("Smart Account created at:", accountAddr);
-        console.log("Account owner:", smartAccount.s_owner());
-        
-        return accountAddr;
+
+    function createTestAccounts() internal {
+        vm.deal(address(this), 100 ether); // Give script plenty of ETH
+
+        // Create three test accounts
+        testAccount1 = createSmartAccount(1);
+        testAccount2 = createSmartAccount(2);
+        testAccount3 = createSmartAccount(3);
+
+        // Fund all accounts
+        fundAccount(testAccount1, 5 ether);
+        fundAccount(testAccount2, 3 ether);
+        fundAccount(testAccount3, 2 ether);
+
+        console.log("Test Account 1:", testAccount1, "Balance:", testAccount1.balance);
+        console.log("Test Account 2:", testAccount2, "Balance:", testAccount2.balance);
+        console.log("Test Account 3:", testAccount3, "Balance:", testAccount3.balance);
     }
-    
-    function fundAccount(address accountAddr) internal {
-        console.log("\n--- Step 3: Funding Account ---");
-        
-        vm.startBroadcast(ownerPrivateKey);
-        payable(accountAddr).transfer(1 ether); // Fund with 1 ETH
-        vm.stopBroadcast();
-        
-        console.log("Account funded with 1 ETH");
-        console.log("Account balance:", address(accountAddr).balance);
-    }
-    
-    function deployTaskManager(address accountAddr) internal {
-        console.log("\n--- Step 4: Deploying TaskManager ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Use UserOperation to deploy TaskManager
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.deployAndLinkTaskManager.selector
-        );
-        
-        executeUserOperation(callData, 0, "Deploy TaskManager");
-        
-        address taskManagerAddr = address(smartAccount.taskManager());
-        console.log("TaskManager deployed and linked at:", taskManagerAddr);
-    }
-    
-    function setPenaltyMechanism(address accountAddr) internal {
-        console.log("\n--- Step 5: Setting Penalty Mechanism ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Set delay penalty of 1 hour (3600 seconds)
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.setDelayPenalty.selector,
+
+    function TaskCreation() internal {
+        console.log("Creating tasks with different penalty types...");
+
+        // Test 1: Delayed payment penalty task
+        console.log("- Creating delayed payment task...");
+        delayedPaymentTaskId = createTaskWithDelayedPayment(
+            testAccount1,
+            "Complete morning workout routine",
+            0.5 ether,
+            7200, // 2 hours
             3600 // 1 hour delay
         );
-        
-        executeUserOperation(callData, 0, "Set Delay Penalty");
-        console.log("Delay penalty set to 1 hour");
-    }
-    
-    function createTasks(address accountAddr) internal {
-        console.log("\n--- Step 6: Creating Tasks ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Create Task 1: Short deadline (30 seconds) - will be completed
-        bytes memory callData1 = abi.encodeWithSelector(
-            SimpleAccount.createTask.selector,
-            "Complete morning workout",
+
+        // Test 2: Buddy penalty task
+        console.log("- Creating buddy penalty task...");
+        buddyPenaltyTaskId = createTaskWithBuddyPenalty(
+            testAccount1,
+            "Finish project documentation",
+            0.3 ether,
+            10800, // 3 hours
+            buddy
+        );
+
+        // Test 3: Task for completion testing
+        console.log("- Creating task for completion test...");
+        completionTaskId = createTaskWithDelayedPayment(
+            testAccount2,
+            "Read 2 chapters of book",
+            0.2 ether,
+            3600, // 1 hour
+            1800 // 30 minutes delay
+        );
+
+        // Test 4: Task for cancellation testing
+        console.log("- Creating task for cancellation test...");
+        cancellationTaskId = createTaskWithBuddyPenalty(
+            testAccount2,
+            "Practice piano for 1 hour",
             0.1 ether,
-            30 // 30 seconds deadline
+            5400, // 1.5 hours
+            buddy
         );
-        
-        executeUserOperation(callData1, 0, "Create Task 1");
-        console.log("Task 1 created: Morning workout (30s deadline, 0.1 ETH reward)");
-        
-        // Create Task 2: Longer deadline (60 seconds) - will expire
-        bytes memory callData2 = abi.encodeWithSelector(
-            SimpleAccount.createTask.selector,
-            "Read 10 pages of book",
-            0.05 ether,
-            60 // 60 seconds deadline
-        );
-        
-        executeUserOperation(callData2, 0, "Create Task 2");
-        console.log("Task 2 created: Read book (60s deadline, 0.05 ETH reward)");
-        
-        // Check total committed rewards
-        console.log("Total committed rewards:", smartAccount.s_totalCommittedReward());
+
+        // Display all created tasks
+        console.log("\nAccount 1 tasks:");
+        displayAllTasks(testAccount1);
+        console.log("\nAccount 2 tasks:");
+        displayAllTasks(testAccount2);
     }
-    
-    function completeTask(address accountAddr, uint256 taskId) internal {
-        console.log("\n--- Step 7: Completing Task ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        uint256 balanceBefore = owner.balance;
-        
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.completeTask.selector,
-            taskId
-        );
-        
-        executeUserOperation(callData, 0, "Complete Task");
-        
-        uint256 balanceAfter = owner.balance;
-        console.log("Task", taskId, "completed!");
-        console.log("Owner balance increased by:", balanceAfter - balanceBefore);
+
+    function TaskCompletion() internal {
+        console.log("Testing task completion flow...");
+
+        console.log("Before completion - Account 2:");
+        displayAccountInfo(testAccount2);
+
+        console.log("Task details before completion:");
+        displayTaskInfo(testAccount2, completionTaskId);
+
+        // Complete the task
+        completeTask(testAccount2, completionTaskId);
+
+        console.log("After completion - Account 2:");
+        displayAccountInfo(testAccount2);
+
+        console.log("Task details after completion:");
+        displayTaskInfo(testAccount2, completionTaskId);
     }
-    
-    function testTaskExpiry(address accountAddr) internal {
-        console.log("\n--- Step 8: Testing Task Expiry ---");
-        
-        smartAccount = SimpleAccount(payable(accountAddr));
-        
-        // Wait for task to expire (advance time by 65 seconds)
-        vm.warp(block.timestamp + 65);
-        console.log("Time advanced by 65 seconds");
-        
-        // Manually expire the second task
-        bytes memory callData = abi.encodeWithSelector(
-            smartAccount.taskManager().expireTask.selector,
-            1 // Task ID 1 (second task)
+
+    function TaskCancellation() internal {
+        console.log("Testing task cancellation flow...");
+
+        console.log("Before cancellation - Account 2:");
+        displayAccountInfo(testAccount2);
+
+        console.log("Task details before cancellation:");
+        displayTaskInfo(testAccount2, cancellationTaskId);
+
+        // Cancel the task
+        cancelTask(testAccount2, cancellationTaskId);
+
+        console.log("After cancellation - Account 2:");
+        displayAccountInfo(testAccount2);
+
+        console.log("Task details after cancellation:");
+        displayTaskInfo(testAccount2, cancellationTaskId);
+    }
+
+    function FundManagement() internal {
+        console.log("Testing fund management...");
+
+        console.log("Initial state - Account 3:");
+        displayAccountInfo(testAccount3);
+
+        // Create a task to commit some funds
+        uint256 taskId = createTaskWithDelayedPayment(
+            testAccount3,
+            "Learn new programming language",
+            0.5 ether,
+            7200, // 2 hours
+            3600 // 1 hour delay
         );
-        
-        // Call directly on TaskManager since expireTask is not owner-restricted
-        vm.startBroadcast(ownerPrivateKey);
-        (bool success,) = address(smartAccount.taskManager()).call(callData);
+
+        console.log("After creating task - committed funds:");
+        displayAccountInfo(testAccount3);
+
+        // Try to transfer available funds
+        uint256 availableBalance = getAvailableBalance(testAccount3);
+        if (availableBalance > 0.1 ether) {
+            console.log("Transferring available funds...");
+            transferFunds(testAccount3, owner, 0.1 ether);
+
+            console.log("After transfer:");
+            displayAccountInfo(testAccount3);
+        }
+
+        // Complete the task to free up committed funds
+        console.log("Completing task to free up committed funds...");
+        completeTask(testAccount3, taskId);
+
+        console.log("Final state after task completion:");
+        displayAccountInfo(testAccount3);
+    }
+
+    function EdgeCases() internal {
+        console.log("Testing edge cases and error conditions...");
+
+        // Test 1: Try to create task with insufficient funds
+        console.log("- Testing insufficient funds scenario...");
+        address lowFundAccount = createSmartAccount(99);
+        fundAccount(lowFundAccount, 0.01 ether); // Very small amount
+        console.log("Low fund account balance:", lowFundAccount.balance);
+
+        // This call should fail because the reward (0.02 ether) > balance (0.01 ether)
+        SmartAccount smartAccount = SmartAccount(payable(lowFundAccount));
+        vm.prank(smartAccount.s_owner());
+        vm.expectRevert(SmartAccount.SmartAccount__AddMoreFunds.selector);
+        smartAccount.createTask("This task should fail", 0.02 ether, 3600, PENALTY_DELAYEDPAYMENT, address(0), 1800);
+        console.log(" Revert on insufficient funds confirmed as expected.");
+
+        // Test 2: Multiple tasks on same account
+        console.log("- Testing multiple tasks on same account...");
+        createTaskWithDelayedPayment(testAccount1, "Task A", 0.1 ether, 3600, 1800);
+        createTaskWithBuddyPenalty(testAccount1, "Task B", 0.1 ether, 3600, buddy);
+        createTaskWithDelayedPayment(testAccount1, "Task C", 0.1 ether, 3600, 1800);
+
+        console.log("Account 1 now has", getTotalTasks(testAccount1), "total tasks");
+
+        // Test 3: Check account prediction
+        console.log("- Testing account address prediction...");
+        address predicted = predictAccountAddress(vm.addr(123), 1);
+        console.log("Predicted address for new user:", predicted);
+    }
+
+    function verifyFinalState() internal view {
+        console.log("Verifying final state of all accounts...");
+
+        console.log("\n=== FINAL ACCOUNT STATES ===");
+
+        console.log("Account 1 Final State:");
+        displayAccountInfo(testAccount1);
+
+        console.log("Account 2 Final State:");
+        displayAccountInfo(testAccount2);
+
+        console.log("Account 3 Final State:");
+        displayAccountInfo(testAccount3);
+
+        // Verify contract states
+        console.log("\n=== CONTRACT STATES ===");
+        console.log("TaskManager:", taskManager);
+        console.log("AccountFactory:", accountFactory);
+        console.log("Entry Point:", entryPoint);
+
+        // Check total tasks across all accounts
+        uint256 totalTasksAll = getTotalTasks(testAccount1) + getTotalTasks(testAccount2) + getTotalTasks(testAccount3);
+        console.log("Total tasks created across all accounts:", totalTasksAll);
+
+        // Check balances
+        console.log("\n=== BALANCE SUMMARY ===");
+        console.log("Account 1 balance:", testAccount1.balance);
+        console.log("Account 2 balance:", testAccount2.balance);
+        console.log("Account 3 balance:", testAccount3.balance);
+        console.log("Script balance remaining:", address(this).balance);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            DEPLOYMENT FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function deployTaskManager() internal returns (address) {
+        vm.startBroadcast();
+        TaskManager tm = new TaskManager();
         vm.stopBroadcast();
-        
-        if (success) {
-            console.log("Task 1 expired - penalty mechanism triggered");
+
+        console.log("TaskManager deployed at:", address(tm));
+        taskManager = address(tm);
+        return address(tm);
+    }
+
+    function deployAccountFactory(address _entryPoint, address _owner, address _taskManager)
+        internal
+        returns (address)
+    {
+        vm.startBroadcast();
+        AccountFactory factory = new AccountFactory(_entryPoint, _owner, _taskManager);
+        vm.stopBroadcast();
+
+        console.log("AccountFactory deployed at:", address(factory));
+        accountFactory = address(factory);
+        return address(factory);
+    }
+
+    function deployAll(address _entryPoint) internal returns (address, address) {
+        address tm = deployTaskManager();
+        address factory = deployAccountFactory(_entryPoint, owner, tm);
+        entryPoint = _entryPoint;
+        return (tm, factory);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            ACCOUNT MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    function createSmartAccount(uint256 userNonce) internal returns (address) {
+        AccountFactory factory = AccountFactory(accountFactory);
+
+        vm.startBroadcast();
+        address account = factory.createAccount(userNonce);
+        vm.stopBroadcast();
+
+        console.log("SmartAccount created at:", account);
+        console.log("For user:", msg.sender);
+        return account;
+    }
+
+    function fundAccount(address account, uint256 amount) internal {
+        vm.startBroadcast();
+        (bool success,) = payable(account).call{value: amount}("");
+        require(success, "Funding failed");
+        vm.stopBroadcast();
+
+        console.log("Funded account:", account);
+        console.log("Amount:", amount);
+        console.log("New balance:", account.balance);
+    }
+
+    function getAccountBalance(address account) public view returns (uint256) {
+        return account.balance;
+    }
+
+    function predictAccountAddress(address user, uint256 userNonce) internal view returns (address) {
+        AccountFactory factory = AccountFactory(accountFactory);
+        return factory.getAddressForUser(user, userNonce);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            TASK MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    function createTaskWithDelayedPayment(
+        address account,
+        string memory description,
+        uint256 rewardAmount,
+        uint256 deadlineInSeconds,
+        uint256 delayDuration
+    ) internal returns (uint256) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+
+        vm.startBroadcast();
+        smartAccount.createTask(
+            description,
+            rewardAmount,
+            deadlineInSeconds,
+            PENALTY_DELAYEDPAYMENT,
+            address(0), // no buddy needed for delayed payment
+            delayDuration
+        );
+        vm.stopBroadcast();
+
+        uint256 totalTasks = smartAccount.getTotalTasks();
+        uint256 taskId = totalTasks - 1; // Latest task ID
+
+        console.log("Task created with delayed payment penalty");
+        console.log("Task ID:", taskId);
+        console.log("Description:", description);
+        console.log("Reward:", rewardAmount);
+        console.log("Delay Duration:", delayDuration);
+
+        return taskId;
+    }
+
+    function createTaskWithBuddyPenalty(
+        address account,
+        string memory description,
+        uint256 rewardAmount,
+        uint256 deadlineInSeconds,
+        address _buddy
+    ) internal returns (uint256) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+
+        vm.startBroadcast();
+        smartAccount.createTask(
+            description,
+            rewardAmount,
+            deadlineInSeconds,
+            PENALTY_SENDBUDDY,
+            _buddy,
+            0 // no delay duration for buddy penalty
+        );
+        vm.stopBroadcast();
+
+        uint256 totalTasks = smartAccount.getTotalTasks();
+        uint256 taskId = totalTasks - 1; // Latest task ID
+
+        console.log("Task created with buddy penalty");
+        console.log("Task ID:", taskId);
+        console.log("Description:", description);
+        console.log("Reward:", rewardAmount);
+        console.log("Buddy:", _buddy);
+
+        return taskId;
+    }
+
+    function completeTask(address account, uint256 taskId) internal {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+
+        vm.startBroadcast();
+        smartAccount.completeTask(taskId);
+        vm.stopBroadcast();
+
+        console.log("Task completed:");
+        console.log("Account:", account);
+        console.log("Task ID:", taskId);
+    }
+
+    function cancelTask(address account, uint256 taskId) internal {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+
+        vm.startBroadcast();
+        smartAccount.cancelTask(taskId);
+        vm.stopBroadcast();
+
+        console.log("Task canceled:");
+        console.log("Account:", account);
+        console.log("Task ID:", taskId);
+    }
+
+    function releaseDelayedPayment(address account, uint256 taskId) internal {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+
+        vm.startBroadcast();
+        smartAccount.releaseDelayedPayment(taskId);
+        vm.stopBroadcast();
+
+        console.log("Delayed payment released:");
+        console.log("Account:", account);
+        console.log("Task ID:", taskId);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function getTask(address account, uint256 taskId) public view returns (ITaskManager.Task memory) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+        return smartAccount.getTask(taskId);
+    }
+
+    function getAllTasks(address account) public view returns (ITaskManager.Task[] memory) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+        uint256 totalTasks = smartAccount.getTotalTasks();
+
+        if (totalTasks == 0) {
+            return new ITaskManager.Task[](0);
+        }
+
+        (ITaskManager.Task[] memory tasks,) = smartAccount.getAllTasks(0, totalTasks);
+        return tasks;
+    }
+
+    function getTotalTasks(address account) public view returns (uint256) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+        return smartAccount.getTotalTasks();
+    }
+
+    function getCommittedReward(address account) public view returns (uint256) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+        return smartAccount.s_totalCommittedReward();
+    }
+
+    function getAvailableBalance(address account) public view returns (uint256) {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+        uint256 totalBalance = account.balance;
+        uint256 committedReward = smartAccount.s_totalCommittedReward();
+
+        if (totalBalance >= committedReward) {
+            return totalBalance - committedReward;
+        }
+        return 0;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            UTILITY FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function transferFunds(address account, address destination, uint256 amount) internal {
+        SmartAccount smartAccount = SmartAccount(payable(account));
+
+        vm.startBroadcast();
+        smartAccount.transfer(destination, amount);
+        vm.stopBroadcast();
+
+        console.log("Transferred funds:");
+        console.log("From account:", account);
+        console.log("To:", destination);
+        console.log("Amount:", amount);
+    }
+
+    function displayTaskInfo(address account, uint256 taskId) public view {
+        ITaskManager.Task memory task = getTask(account, taskId);
+
+        console.log("=== Task Information ===");
+        console.log("ID:", task.id);
+        console.log("Description:", task.description);
+        console.log("Reward Amount:", task.rewardAmount);
+        console.log("Deadline:", task.deadline);
+        console.log("Status:", uint8(task.status));
+        console.log("Penalty Choice:", task.choice);
+        console.log("Delay Duration:", task.delayDuration);
+        console.log("Buddy:", task.buddy);
+        console.log("Delayed Reward Released:", task.delayedRewardReleased);
+    }
+
+    function displayAccountInfo(address account) public view {
+        console.log("=== Account Information ===");
+        console.log("Address:", account);
+        console.log("Total Balance:", account.balance);
+        console.log("Committed Reward:", getCommittedReward(account));
+        console.log("Available Balance:", getAvailableBalance(account));
+        console.log("Total Tasks:", getTotalTasks(account));
+    }
+
+    function displayAllTasks(address account) public view {
+        console.log("=== All Tasks ===");
+        ITaskManager.Task[] memory tasks = getAllTasks(account);
+
+        for (uint256 i = 0; i < tasks.length; i++) {
+            console.log("--- Task", i, "---");
+            console.log("ID:", tasks[i].id);
+            console.log("Description:", tasks[i].description);
+            console.log("Reward:", tasks[i].rewardAmount);
+            console.log("Status:", uint8(tasks[i].status));
+            console.log("Penalty Choice:", tasks[i].choice);
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            TEST SCENARIOS
+    //////////////////////////////////////////////////////////////*/
+
+    function CompleteWorkflow() internal {
+        console.log("=== Starting Complete Workflow Test ===");
+
+        // Step 1: Deploy contracts
+        console.log("\n--- Step 1: Deploying Contracts ---");
+        address mockEntryPoint = vm.addr(999);
+        deployAll(mockEntryPoint);
+
+        // Step 2: Create and fund a smart account
+        console.log("\n--- Step 2: Creating and Funding Smart Account ---");
+        address account = createSmartAccount(1);
+        fundAccount(account, 5 ether);
+        displayAccountInfo(account);
+
+        // Step 3: Create and complete a task
+        console.log("\n--- Step 3: Task Completion ---");
+        uint256 taskIdToComplete = createTaskWithDelayedPayment(account, "Task to be completed", 0.5 ether, 3600, 1800);
+        console.log(" Completing task...");
+        completeTask(account, taskIdToComplete);
+        displayAccountInfo(account);
+
+        // Step 4: Create and cancel a task
+        console.log("\n--- Step 4: Task Cancellation ---");
+        uint256 taskIdToCancel = createTaskWithBuddyPenalty(account, "Task to be canceled", 0.3 ether, 7200, buddy);
+        console.log(" Cancelling task...");
+        cancelTask(account, taskIdToCancel);
+        displayAccountInfo(account);
+
+        // Step 5: Expire a task with delayed payment penalty
+        console.log("\n--- Step 5: Task Expiration (Delayed Payment) ---");
+        uint256 taskIdToExpireDelay =
+            createTaskWithDelayedPayment(account, "Task to expire (delay)", 0.2 ether, 60, 120); // 1 min deadline, 2 min delay
+        console.log(" Warping time past deadline...");
+        vm.warp(block.timestamp + 61);
+
+        console.log(" Performing upkeep to expire task...");
+        (bool upkeepNeeded, bytes memory performData) = checkUpkeep();
+        if (upkeepNeeded) {
+            performUpkeep(performData);
         } else {
-            console.log("Failed to expire task");
+            console.log(" Upkeep not needed (unexpected).");
         }
-        
-        // Try to release delayed payment after delay period
-        vm.warp(block.timestamp + 3601); // Wait for delay period
-        
-        bytes memory releaseCallData = abi.encodeWithSelector(
-            SimpleAccount.releaseDelayedPayment.selector,
-            1
-        );
-        
-        executeUserOperation(releaseCallData, 0, "Release Delayed Payment");
-        console.log("Delayed payment released after penalty period");
-    }
-    
-    function executeUserOperation(bytes memory callData, uint256 value, string memory description) internal {
-        console.log("Executing:", description);
-        
-        // Prepare the execute call
-        bytes memory executeCallData = abi.encodeWithSelector(
-            SimpleAccount.execute.selector,
-            address(smartAccount),
-            value,
-            callData
-        );
-        
-        // Generate and execute UserOperation
-        PackedUserOperation memory userOp = generateSignedUserOperation(
-            executeCallData,
-            address(smartAccount)
-        );
-        
-        vm.startBroadcast(ownerPrivateKey);
-        
-        PackedUserOperation[] memory userOps = new PackedUserOperation[](1);
-        userOps[0] = userOp;
-        
-        try IEntryPoint(config.entryPoint).handleOps(userOps, payable(owner)) {
-            console.log(" UserOperation executed successfully");
-        } catch Error(string memory reason) {
-            console.log(" UserOperation failed:", reason);
-        } catch {
-            console.log(" UserOperation failed with unknown error");
-        }
-        
-        vm.stopBroadcast();
-    }
-    
-    function generateSignedUserOperation(
-        bytes memory callData,
-        address sender
-    ) internal view returns (PackedUserOperation memory) {
-        uint256 nonce = IEntryPoint(config.entryPoint).getNonce(sender, 0);
-        PackedUserOperation memory userOp = _generateUnsignedUserOperation(callData, sender, nonce);
-        
-        bytes32 userOpHash = IEntryPoint(config.entryPoint).getUserOpHash(userOp);
-        bytes32 digest = userOpHash.toEthSignedMessageHash();
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPrivateKey, digest);
-        userOp.signature = abi.encodePacked(r, s, v);
-        
-        return userOp;
-    }
-    
-    function _generateUnsignedUserOperation(
-        bytes memory callData,
-        address sender,
-        uint256 nonce
-    ) internal pure returns (PackedUserOperation memory) {
-        uint128 verificationGasLimit = 1e6;
-        uint128 callGasLimit = 1e6;
-        uint128 maxPriorityFeePerGas = 1e9;
-        uint128 maxFeePerGas = 2e9;
-        
-        return PackedUserOperation({
-            sender: sender,
-            nonce: nonce,
-            initCode: hex"",
-            callData: callData,
-            accountGasLimits: bytes32(uint256(verificationGasLimit) << 128 | callGasLimit),
-            preVerificationGas: verificationGasLimit,
-            gasFees: bytes32(uint256(maxPriorityFeePerGas) << 128 | maxFeePerGas),
-            paymasterAndData: hex"",
-            signature: hex""
-        });
-    }
-}
+        displayTaskInfo(account, taskIdToExpireDelay);
 
-/**
- * @title Simple Account Creation Script
- * @notice Basic script to create an account
- */
-contract CreateAccountScript is Script {
-    function run() external {
-        // Get configuration
-        HelperConfig configHelper = new HelperConfig();
-        HelperConfig.NetworkConfig memory config = configHelper.getConfig();
-        
-        // Set up owner
-        uint256 ownerPrivateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
-        address owner = vm.addr(ownerPrivateKey);
-        
-        vm.startBroadcast(ownerPrivateKey);
-        
-        // Deploy factory
-        AccountFactory factory = new AccountFactory(config.entryPoint, owner);
-        console.log("Factory deployed at:", address(factory));
-        
-        // Create account
-        uint256 nonce = 0;
-        address account = factory.createAccount(nonce);
-        console.log("Created account at:", account);
-        
-        // Fund the account
-        payable(account).transfer(0.5 ether);
-        console.log("Account funded with 0.5 ETH");
-        
-        vm.stopBroadcast();
-    }
-}
+        console.log(" Warping time past delay duration...");
+        vm.warp(block.timestamp + 121);
+        console.log(" Releasing delayed payment...");
+        releaseDelayedPayment(account, taskIdToExpireDelay);
+        displayAccountInfo(account);
+        displayTaskInfo(account, taskIdToExpireDelay);
 
-/**
- * @title Task Management Test Script
- * @notice Tests task creation, completion, and expiry
- */
-contract TaskManagementTest is Script {
-    using MessageHashUtils for bytes32;
-    
-    address constant SMART_ACCOUNT = 0x73Ff90Df627AA6d6fe997FEC4CcAE2eF736F03e3; // Update this
-    uint256 constant OWNER_PRIVATE_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
-    
-    function run() external {
-        address owner = vm.addr(OWNER_PRIVATE_KEY);
-        
-        // Get configuration
-        HelperConfig configHelper = new HelperConfig();
-        HelperConfig.NetworkConfig memory config = configHelper.getConfig();
-        
-        SimpleAccount smartAccount = SimpleAccount(payable(SMART_ACCOUNT));
-        
-        // Test 1: Deploy TaskManager if not exists
-        if (address(smartAccount.taskManager()) == address(0)) {
-            console.log("Deploying TaskManager...");
-            executeUserOp(
-                abi.encodeWithSelector(SimpleAccount.deployAndLinkTaskManager.selector),
-                config,
-                owner,
-                SMART_ACCOUNT,
-                0
-            );
+        // Step 6: Expire a task with buddy penalty
+        console.log("\n--- Step 6: Task Expiration (Buddy Penalty) ---");
+        uint256 buddyBalanceBefore = buddy.balance;
+        console.log(" Buddy balance before:", buddyBalanceBefore);
+        uint256 taskIdToExpireBuddy =
+            createTaskWithBuddyPenalty(account, "Task to expire (buddy)", 0.4 ether, 60, buddy);
+        displayAccountInfo(account);
+
+        console.log(" Warping time past deadline...");
+        vm.warp(block.timestamp + 61);
+
+        console.log(" Performing upkeep to expire task...");
+        (upkeepNeeded, performData) = checkUpkeep();
+        if (upkeepNeeded) {
+            performUpkeep(performData);
+        } else {
+            console.log(" Upkeep not needed (unexpected).");
         }
-        
-        // Test 2: Set penalty mechanism
-        console.log("Setting delay penalty...");
-        executeUserOp(
-            abi.encodeWithSelector(SimpleAccount.setDelayPenalty.selector, 1800), // 30 minutes
-            config,
-            owner,
-            SMART_ACCOUNT,
-            0
-        );
-        
-        // Test 3: Create a task
-        console.log("Creating task...");
-        bytes memory taskCallData = abi.encodeWithSelector(
-            SimpleAccount.createTask.selector,
-            "Complete daily exercise",
-            0.01 ether,
-            300 // 5 minutes
-        );
-        
-        executeUserOp(taskCallData, config, owner, SMART_ACCOUNT, 0);
-        
-        console.log("Task created successfully!");
-        console.log("Total committed rewards:", smartAccount.s_totalCommittedReward());
+
+        uint256 buddyBalanceAfter = buddy.balance;
+        console.log(" Buddy balance after:", buddyBalanceAfter);
+        console.log(" Reward transferred to buddy:", buddyBalanceAfter - buddyBalanceBefore);
+        displayAccountInfo(account);
+        displayTaskInfo(account, taskIdToExpireBuddy);
+
+        console.log("\n=== Workflow Test Complete ===");
     }
-    
-    function executeUserOp(
-        bytes memory functionData,
-        HelperConfig.NetworkConfig memory config,
-        address owner,
-        address smartAccount,
-        uint256 value
-    ) internal {
-        bytes memory callData = abi.encodeWithSelector(
-            SimpleAccount.execute.selector,
-            smartAccount,
-            value,
-            functionData
-        );
-        
-        vm.startBroadcast(OWNER_PRIVATE_KEY);
-        
-        // Fund account if needed
-        if (smartAccount.balance < 0.1 ether) {
-            payable(smartAccount).transfer(0.1 ether);
-        }
-        
-        PackedUserOperation memory userOp = generateSignedUserOperation(
-            callData,
-            config,
-            OWNER_PRIVATE_KEY,
-            smartAccount
-        );
-        
-        PackedUserOperation[] memory userOps = new PackedUserOperation[](1);
-        userOps[0] = userOp;
-        
-        IEntryPoint(config.entryPoint).handleOps(userOps, payable(owner));
-        
+
+    function TaskCompletion(address account, uint256 taskId) internal {
+        console.log("=== Testing Task Completion ===");
+
+        displayTaskInfo(account, taskId);
+        completeTask(account, taskId);
+        displayTaskInfo(account, taskId);
+        displayAccountInfo(account);
+    }
+
+    function TaskExpiration() internal view {
+        console.log("=== Testing Task Expiration ===");
+        // This would require time manipulation in a test environment
+        // Implementation depends on your testing framework setup
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            CHAINLINK AUTOMATION
+    //////////////////////////////////////////////////////////////*/
+
+    function checkUpkeep() public view returns (bool upkeepNeeded, bytes memory performData) {
+        TaskManager tm = TaskManager(taskManager);
+        return tm.checkUpkeep("");
+    }
+
+    function performUpkeep(bytes memory performData) public {
+        TaskManager tm = TaskManager(taskManager);
+
+        vm.startBroadcast();
+        tm.performUpkeep(performData);
         vm.stopBroadcast();
+
+        console.log("Performed upkeep with data:", string(performData));
     }
-    
-    function generateSignedUserOperation(
-        bytes memory callData,
-        HelperConfig.NetworkConfig memory config,
-        uint256 privateKey,
-        address sender
-    ) internal view returns (PackedUserOperation memory) {
-        uint256 nonce = IEntryPoint(config.entryPoint).getNonce(sender, 0);
-        PackedUserOperation memory userOp = _generateUnsignedUserOperation(callData, sender, nonce);
-        
-        bytes32 userOpHash = IEntryPoint(config.entryPoint).getUserOpHash(userOp);
-        bytes32 digest = userOpHash.toEthSignedMessageHash();
-        
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
-        userOp.signature = abi.encodePacked(r, s, v);
-        
-        return userOp;
+
+    /*//////////////////////////////////////////////////////////////
+                            EMERGENCY FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function emergencyWithdraw(address account) public {
+        uint256 availableBalance = getAvailableBalance(account);
+        if (availableBalance > 0) {
+            transferFunds(account, owner, availableBalance);
+            console.log("Emergency withdrawal completed");
+            console.log("Amount withdrawn:", availableBalance);
+        } else {
+            console.log("No available balance to withdraw");
+        }
     }
-    
-    function _generateUnsignedUserOperation(
-        bytes memory callData,
-        address sender,
-        uint256 nonce
-    ) internal pure returns (PackedUserOperation memory) {
-        uint128 verificationGasLimit = 1e6;
-        uint128 callGasLimit = 1e6;
-        uint128 maxPriorityFeePerGas = 1e9;
-        uint128 maxFeePerGas = 2e9;
-        
-        return PackedUserOperation({
-            sender: sender,
-            nonce: nonce,
-            initCode: hex"",
-            callData: callData,
-            accountGasLimits: bytes32(uint256(verificationGasLimit) << 128 | callGasLimit),
-            preVerificationGas: verificationGasLimit,
-            gasFees: bytes32(uint256(maxPriorityFeePerGas) << 128 | maxFeePerGas),
-            paymasterAndData: hex"",
-            signature: hex""
-        });
+
+    // Helper function to get current timestamp (useful for testing)
+    function getCurrentTimestamp() public view returns (uint256) {
+        return block.timestamp;
     }
 }
