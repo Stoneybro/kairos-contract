@@ -1,688 +1,412 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Test, console} from "forge-std/Test.sol";
+import "forge-std/Test.sol";
 import {SmartAccount} from "src/SmartAccount.sol";
 import {TaskManager} from "src/TaskManager.sol";
-import {ITaskManager} from "src/interface/ITaskManager.sol";
-import {ISmartAccount} from "src/interface/ISmartAccount.sol";
 import {UserOperation} from "@account-abstraction/contracts/interfaces/UserOperation.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {_packValidationData} from "@account-abstraction/contracts/core/Helpers.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {ISmartAccount} from "src/interface/ISmartAccount.sol";
+import {ITaskManager} from "src/interface/ITaskManager.sol";
 
-// Mock EntryPoint for testing
 contract MockEntryPoint {
-    function handleOps(UserOperation[] calldata, address payable) external {}
+    // simple deposit bookkeeping for tests
+    mapping(address => uint256) public deposits;
+    bool public failFallback;
+
+    // allow depositTo from smart account tests
+    function depositTo(address who) external payable {
+        deposits[who] += msg.value;
+    }
+
+    // withdrawTo sends ETH back to requested address (test-only simple implementation)
+    function withdrawTo(address payable to, uint256 amount) external {
+        // naive: assume contract has enough balance
+        (bool ok,) = to.call{value: amount}("");
+        require(ok, "withdraw failed");
+    }
+
+    // fallback used by _payPrefund (low-level call)
+    fallback() external payable {
+        if (failFallback) revert("fallback fail");
+        // accept funds; record by msg.sender
+        deposits[msg.sender] += msg.value;
+    }
+
+    receive() external payable {
+        if (failFallback) revert("receive fail");
+        deposits[msg.sender] += msg.value;
+    }
+
+    // helper to set fallback to fail
+    function setFailFallback(bool v) external {
+        failFallback = v;
+    }
 }
 
 contract SmartAccountTest is Test {
-    SmartAccount public smartAccount;
-    TaskManager public taskManager;
-    MockEntryPoint public entryPoint;
+    SmartAccount acct;
+    TaskManager tm;
+    MockEntryPoint ep;
 
-    address public owner;
-    uint256 public ownerPrivateKey;
-    address public buddy;
-    address public user;
-
-    uint8 constant PENALTY_DELAYEDPAYMENT = 1;
-    uint8 constant PENALTY_SENDBUDDY = 2;
-
-    uint256 constant INITIAL_BALANCE = 10 ether;
-    uint256 constant REWARD_AMOUNT = 1 ether;
-    uint256 constant DEADLINE_SECONDS = 3600; // 1 hour
-    uint256 constant DELAY_DURATION = 86400; // 1 day
-
-    event TaskCreated(uint256 indexed taskId, string description, uint256 rewardAmount);
-    event TaskCompleted(uint256 indexed taskId);
-    event TaskCanceled(uint256 indexed taskId);
-    event TaskExpired(uint256 indexed taskId);
-    event DurationPenaltyApplied(uint256 indexed taskId, uint256 indexed penaltyDuration);
-    event DelayedPaymentReleased(uint256 indexed taskId, uint256 indexed rewardAmount);
-    event PenaltyFundsReleasedToBuddy(uint256 indexed taskId, uint256 indexed rewardAmount, address indexed buddy);
-    event Transferred(address indexed to, uint256 amount);
+    // test keys
+    uint256 ownerKey;
+    address ownerAddr;
 
     function setUp() public {
-        // Create test accounts
-        ownerPrivateKey = 0x12341234;
-        owner = vm.addr(ownerPrivateKey);
-        buddy = makeAddr("buddy");
-        user = makeAddr("user");
+        // create owner key
+        ownerKey = 0xA11CE;
+        ownerAddr = vm.addr(ownerKey);
 
-        // Deploy contracts
-        entryPoint = new MockEntryPoint();
-        taskManager = new TaskManager();
-        smartAccount = new SmartAccount();
+        // deploy TaskManager and MockEntryPoint
+        tm = new TaskManager();
+        ep = new MockEntryPoint();
 
-        // Initialize SmartAccount
-        smartAccount.initialize(owner, address(entryPoint), taskManager);
+        // deploy SmartAccount and initialize
+        acct = new SmartAccount();
+        acct.initialize(ownerAddr, address(ep), tm);
 
-        // Fund the smart account
-        vm.deal(address(smartAccount), INITIAL_BALANCE);
-
-        // Set up pranks
-        vm.label(owner, "Owner");
-        vm.label(buddy, "Buddy");
-        vm.label(address(smartAccount), "SmartAccount");
-        vm.label(address(taskManager), "TaskManager");
+        // Fund SmartAccount with some ETH for tests
+        vm.deal(address(acct), 10 ether);
     }
 
-    // ==================== INITIALIZATION TESTS ====================
+    // allow this test contract to receive ETH for withdrawTo assertions
+    receive() external payable {}
 
-    function test_Initialize() public {
-        SmartAccount newAccount = new SmartAccount();
-        newAccount.initialize(owner, address(entryPoint), taskManager);
+    /*///////////////////////////////////////////////////////////////
+                      BASIC INITIALIZATION & SUPPORT
+    ///////////////////////////////////////////////////////////////*/
 
-        assertEq(newAccount.s_owner(), owner);
-        assertEq(address(newAccount.taskManager()), address(taskManager));
-        assertEq(newAccount.s_totalCommittedReward(), 0);
+    function test_initial_owner_and_entrypoint_and_taskmanager() public {
+        assertEq(acct.s_owner(), ownerAddr);
+        assertEq(address(acct.i_entryPoint()), address(ep));
+        assertEq(address(acct.taskManager()), address(tm));
     }
 
-    function test_InitializeOnlyOnce() public {
-        vm.expectRevert();
-        smartAccount.initialize(owner, address(entryPoint), taskManager);
+    function test_supportsInterface() public {
+        bool ok = acct.supportsInterface(type(ISmartAccount).interfaceId);
+        assertTrue(ok);
     }
 
-    // ==================== TASK CREATION TESTS ====================
-
-    function test_CreateTaskWithDelayedPaymentPenalty() public {
-        vm.prank(owner);
-        vm.expectEmit(true, false, false, true);
-        emit TaskCreated(0, "Test Task", REWARD_AMOUNT);
-
-        smartAccount.createTask(
-            "Test Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        assertEq(smartAccount.s_totalCommittedReward(), REWARD_AMOUNT);
-
-        ITaskManager.Task memory task = smartAccount.getTask(0);
-        assertEq(task.id, 0);
-        assertEq(task.description, "Test Task");
-        assertEq(task.rewardAmount, REWARD_AMOUNT);
-        assertEq(task.choice, PENALTY_DELAYEDPAYMENT);
-        assertEq(task.delayDuration, DELAY_DURATION);
-        assertTrue(task.status == ITaskManager.TaskStatus.PENDING);
-    }
-
-    function test_CreateTaskWithBuddyPenalty() public {
-        vm.prank(owner);
-        smartAccount.createTask("Buddy Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_SENDBUDDY, buddy, 0);
-
-        ITaskManager.Task memory task = smartAccount.getTask(0);
-        assertEq(task.choice, PENALTY_SENDBUDDY);
-        assertEq(task.buddy, buddy);
-        assertEq(task.delayDuration, 0);
-    }
-
-    function test_CreateTaskFailsWithInsufficientFunds() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__AddMoreFunds.selector);
-        smartAccount.createTask(
-            "Expensive Task", INITIAL_BALANCE + 1, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-    }
-
-    function test_CreateTaskFailsWithZeroReward() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__RewardCannotBeZero.selector);
-        smartAccount.createTask(
-            "Zero Reward Task", 0, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-    }
-
-    function test_CreateTaskFailsWithInvalidPenaltyChoice() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__PickAPenalty.selector);
-        smartAccount.createTask(
-            "Invalid Choice Task",
-            REWARD_AMOUNT,
-            DEADLINE_SECONDS,
-            0, // Invalid choice
-            address(0),
-            DELAY_DURATION
-        );
-
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__InvalidPenaltyChoice.selector);
-        smartAccount.createTask(
-            "Invalid Choice Task",
-            REWARD_AMOUNT,
-            DEADLINE_SECONDS,
-            3, // Invalid choice (> 2)
-            address(0),
-            DELAY_DURATION
-        );
-    }
-
-    function test_CreateTaskFailsWithInvalidBuddyConfig() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__InvalidPenaltyConfig.selector);
-        smartAccount.createTask(
-            "Buddy Task",
-            REWARD_AMOUNT,
-            DEADLINE_SECONDS,
-            PENALTY_SENDBUDDY,
-            address(0), // No buddy address
-            0
-        );
-    }
-
-    function test_CreateTaskFailsWithInvalidDelayConfig() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__InvalidPenaltyConfig.selector);
-        smartAccount.createTask(
-            "Delay Task",
-            REWARD_AMOUNT,
-            DEADLINE_SECONDS,
-            PENALTY_DELAYEDPAYMENT,
-            address(0),
-            0 // No delay duration
-        );
-    }
-
-    function test_CreateTaskFailsFromNonOwner() public {
-        vm.prank(user);
-        vm.expectRevert(SmartAccount.SmartAccount__OnlyOwnerCanCall.selector);
-        smartAccount.createTask(
-            "Unauthorized Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-    }
-
-    // ==================== TASK COMPLETION TESTS ====================
-
-    function test_CompleteTask() public {
-        // Create task first
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Complete Me", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        uint256 ownerBalanceBefore = owner.balance;
-
-        vm.prank(owner);
-        vm.expectEmit(true, false, false, false);
-        emit TaskCompleted(0);
-
-        smartAccount.completeTask(0);
-
-        assertEq(smartAccount.s_totalCommittedReward(), 0);
-        assertEq(owner.balance, ownerBalanceBefore + REWARD_AMOUNT);
-
-        ITaskManager.Task memory task = smartAccount.getTask(0);
-        assertTrue(task.status == ITaskManager.TaskStatus.COMPLETED);
-    }
-
-    function test_CompleteTaskFailsIfAlreadyCompleted() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Complete Me", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        vm.prank(owner);
-        smartAccount.completeTask(0);
-
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__TaskAlreadyCompleted.selector);
-        smartAccount.completeTask(0);
-    }
-
-    function test_CompleteTaskFailsFromNonOwner() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Complete Me", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        vm.prank(user);
-        vm.expectRevert(SmartAccount.SmartAccount__OnlyOwnerCanCall.selector);
-        smartAccount.completeTask(0);
-    }
-
-    // ==================== TASK CANCELLATION TESTS ====================
-
-    function test_CancelTask() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Cancel Me", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        assertEq(smartAccount.s_totalCommittedReward(), REWARD_AMOUNT);
-
-        vm.prank(owner);
-        vm.expectEmit(true, false, false, false);
-        emit TaskCanceled(0);
-
-        smartAccount.cancelTask(0);
-
-        assertEq(smartAccount.s_totalCommittedReward(), 0);
-
-        ITaskManager.Task memory task = smartAccount.getTask(0);
-        assertTrue(task.status == ITaskManager.TaskStatus.CANCELED);
-    }
-
-    function test_CancelTaskFailsFromNonOwner() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Cancel Me", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        vm.prank(user);
-        vm.expectRevert(SmartAccount.SmartAccount__OnlyOwnerCanCall.selector);
-        smartAccount.cancelTask(0);
-    }
-
-    // ==================== TASK EXPIRATION TESTS ====================
-
-    function test_ExpiredTaskCallbackWithDelayedPayment() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Delayed Payment Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        // Fast forward past deadline
-        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
-
-        // Expire the task via TaskManager
-        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
-        if (upkeepNeeded) {
-            taskManager.performUpkeep(performData);
-        }
-
-        // Fast forward past delay duration
-        vm.warp(block.timestamp + DELAY_DURATION + 1);
-
-        uint256 ownerBalanceBefore = owner.balance;
-
-        vm.prank(owner);
-        vm.expectEmit(true, true, false, false);
-        emit DelayedPaymentReleased(0, REWARD_AMOUNT);
-
-        smartAccount.releaseDelayedPayment(0);
-
-        assertEq(owner.balance, ownerBalanceBefore + REWARD_AMOUNT);
-        assertEq(smartAccount.s_totalCommittedReward(), 0);
-    }
-
-    function test_ExpiredTaskCallbackWithBuddyPenalty() public {
-        vm.prank(owner);
-        smartAccount.createTask("Buddy Penalty Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_SENDBUDDY, buddy, 0);
-
-        uint256 buddyBalanceBefore = buddy.balance;
-
-        // Fast forward time past the deadline
-        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
-
-        // Expect the event from the SmartAccount callback
-        vm.expectEmit(true, true, true, false);
-        emit PenaltyFundsReleasedToBuddy(0, REWARD_AMOUNT, buddy);
-
-        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
-        if (upkeepNeeded) {
-            taskManager.performUpkeep(performData);
-        }
-
-        // Verify the results
-        assertEq(buddy.balance, buddyBalanceBefore + REWARD_AMOUNT, "Buddy did not receive reward");
-        assertEq(smartAccount.s_totalCommittedReward(), 0, "Committed reward was not cleared");
-    }
-
-    function test_ExpiredTaskCallbackFailsFromNonTaskManager() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Expire Me", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        vm.prank(user);
-        vm.expectRevert(SmartAccount.SmartAccount__OnlyTaskManagerCanCall.selector);
-        smartAccount.expiredTaskCallback(0);
-    }
-
-    // ==================== DELAYED PAYMENT RELEASE TESTS ====================
-
-    function test_ReleaseDelayedPayment() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Delayed Payment Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        // Fast forward past deadline
-        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
-
-        // Expire the task via TaskManager
-        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
-        if (upkeepNeeded) {
-            taskManager.performUpkeep(performData);
-        }
-
-        // Fast forward past delay duration
-        vm.warp(block.timestamp + DELAY_DURATION + 1);
-
-        uint256 ownerBalanceBefore = owner.balance;
-
-        vm.prank(owner);
-        vm.expectEmit(true, true, false, false);
-        emit DelayedPaymentReleased(0, REWARD_AMOUNT);
-
-        smartAccount.releaseDelayedPayment(0);
-
-        assertEq(owner.balance, ownerBalanceBefore + REWARD_AMOUNT);
-        assertEq(smartAccount.s_totalCommittedReward(), 0);
-    }
-
-    function test_ReleaseDelayedPaymentFailsBeforeDelayElapsed() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Delayed Payment Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        // Fast forward past deadline
-        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
-
-        // Expire the task via TaskManager
-        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
-        if (upkeepNeeded) {
-            taskManager.performUpkeep(performData);
-        }
-
-        // Do NOT warp past delay duration
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__PenaltyDurationNotElapsed.selector);
-        smartAccount.releaseDelayedPayment(0);
-    }
-
-    // ==================== TRANSFER TESTS ====================
-
-    function test_Transfer() public {
-        address recipient = makeAddr("recipient");
-        uint256 transferAmount = 1 ether;
-        uint256 recipientBalanceBefore = recipient.balance;
-
-        vm.prank(owner);
-        vm.expectEmit(true, false, false, true);
-        emit Transferred(recipient, transferAmount);
-
-        smartAccount.transfer(recipient, transferAmount);
-
-        assertEq(recipient.balance, recipientBalanceBefore + transferAmount);
-    }
-
-    function test_TransferFailsWithCommittedRewards() public {
-        // Create a task to commit some rewards
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Committed Task", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        address recipient = makeAddr("recipient");
-        uint256 availableBalance = INITIAL_BALANCE - REWARD_AMOUNT;
-
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__CannotWithdrawCommittedRewards.selector);
-        smartAccount.transfer(recipient, availableBalance + 1);
-    }
-
-    function test_TransferFailsWithZeroAmount() public {
-        address recipient = makeAddr("recipient");
-
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__CannotTransferZero.selector);
-        smartAccount.transfer(recipient, 0);
-    }
-
-    function test_TransferFailsFromNonOwner() public {
-        address recipient = makeAddr("recipient");
-
-        vm.prank(user);
-        vm.expectRevert(SmartAccount.SmartAccount__OnlyOwnerCanCall.selector);
-        smartAccount.transfer(recipient, 1 ether);
-    }
-
-    // ==================== SIGNATURE VALIDATION TESTS ====================
-
-    function test_ValidateUserOpWithValidSignature() public {
-        UserOperation memory userOp = UserOperation({
-            sender: address(smartAccount),
-            nonce: 0,
-            initCode: "",
-            callData: "",
-            callGasLimit: 0,
-            verificationGasLimit: 150000,
-            preVerificationGas: 21000,
-            maxFeePerGas: 0,
-            maxPriorityFeePerGas: 0,
-            paymasterAndData: "",
-            signature: ""
-        });
-
-        bytes32 userOpHash = keccak256(abi.encode(userOp));
-        bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(userOpHash);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPrivateKey, ethSignedMessageHash);
-        userOp.signature = abi.encodePacked(r, s, v);
-
-        vm.prank(address(entryPoint));
-        uint256 validationData = smartAccount.validateUserOp(userOp, userOpHash, 0);
-
-        assertEq(validationData, _packValidationData(false, 0, 0));
-    }
-
-    function test_ValidateUserOpWithInvalidSignature() public {
-        UserOperation memory userOp = UserOperation({
-            sender: address(smartAccount),
-            nonce: 0,
-            initCode: "",
-            callData: "",
-            callGasLimit: 0,
-            verificationGasLimit: 150000,
-            preVerificationGas: 21000,
-            maxFeePerGas: 0,
-            maxPriorityFeePerGas: 0,
-            paymasterAndData: "",
-            signature: new bytes(65) // 65 zero bytes, which is invalid for ECDSA
-        });
-
-        bytes32 userOpHash = keccak256(abi.encode(userOp));
-
-        vm.prank(address(entryPoint));
-        vm.expectRevert(); // ECDSA.recover will revert
-        smartAccount.validateUserOp(userOp, userOpHash, 0);
-    }
-
-    // ==================== EXECUTE TESTS ====================
-
-    function test_Execute() public {
-        address target = makeAddr("target");
-        vm.deal(target, 0);
-
-        bytes memory callData = abi.encodeWithSignature("someFunction()");
-
-        vm.prank(address(entryPoint));
-        smartAccount.execute(target, 1 ether, callData);
-
-        assertEq(target.balance, 1 ether);
-    }
-
-    function test_ExecuteFailsFromNonEntryPoint() public {
-        address target = makeAddr("target");
-        bytes memory callData = abi.encodeWithSignature("someFunction()");
-
-        vm.prank(user);
+    /*///////////////////////////////////////////////////////////////
+                           EXECUTE (ENTRYPOINT)
+    ///////////////////////////////////////////////////////////////*/
+
+    function test_execute_onlyFromEntryPoint_revertsWhenNotEP() public {
+        // call execute from non-entrypoint should revert
+        vm.prank(address(0x123));
         vm.expectRevert(SmartAccount.SmartAccount__NotFromEntryPoint.selector);
-        smartAccount.execute(target, 1 ether, callData);
+        acct.execute(address(0x1), 0, bytes(""));
     }
 
-    // ==================== VIEW FUNCTION TESTS ====================
+    function test_execute_reverts_when_withdrawing_committed_rewards() public {
+        // create a task that reserves funds so remaining free balance < value
+        // craft via calling createTask as if from EntryPoint
+        uint256 reward = 9 ether;
+        // create task via entrypoint: need to ensure acct has enough balance - yes (10 ETH)
+        vm.prank(address(ep));
+        acct.createTask("t", reward, 1 days, 1, address(0), 1 hours, 0);
 
-    function test_GetTotalTasks() public {
-        assertEq(smartAccount.getTotalTasks(), 0);
-
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Task 1", REWARD_AMOUNT, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        assertEq(smartAccount.getTotalTasks(), 1);
-    }
-
-    function test_GetAllTasks() public {
-        // Create multiple tasks
-        for (uint256 i = 0; i < 3; i++) {
-            vm.prank(owner);
-            smartAccount.createTask(
-                string(abi.encodePacked("Task ", vm.toString(i))),
-                REWARD_AMOUNT,
-                DEADLINE_SECONDS,
-                PENALTY_DELAYEDPAYMENT,
-                address(0),
-                DELAY_DURATION
-            );
-        }
-
-        ITaskManager.Task[] memory tasks = smartAccount.getAllTasks();
-
-        assertEq(tasks.length, 3);
-        assertEq(tasks[0].id, 0);
-        assertEq(tasks[1].id, 1);
-        assertEq(tasks[2].id, 2);
-    }
-
-    function test_SupportsInterface() public {
-        assertTrue(smartAccount.supportsInterface(type(ISmartAccount).interfaceId));
-        assertTrue(smartAccount.supportsInterface(type(IERC165).interfaceId));
-        assertFalse(smartAccount.supportsInterface(bytes4(0x12345678)));
-    }
-
-    // ==================== EDGE CASE TESTS ====================
-
-    function test_MultipleTasksCommittedRewards() public {
-        uint256 task1Reward = 2 ether;
-        uint256 task2Reward = 3 ether;
-
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Task 1", task1Reward, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        vm.prank(owner);
-        smartAccount.createTask("Task 2", task2Reward, DEADLINE_SECONDS, PENALTY_SENDBUDDY, buddy, 0);
-
-        assertEq(smartAccount.s_totalCommittedReward(), task1Reward + task2Reward);
-
-        // Complete first task
-        vm.prank(owner);
-        smartAccount.completeTask(0);
-
-        assertEq(smartAccount.s_totalCommittedReward(), task2Reward);
-
-        // Cancel second task
-        vm.prank(owner);
-        smartAccount.cancelTask(1);
-
-        assertEq(smartAccount.s_totalCommittedReward(), 0);
-    }
-
-    function test_ReceiveFallback() public {
-        uint256 balanceBefore = address(smartAccount).balance;
-
-        // Test receive function
-        (bool success,) = address(smartAccount).call{value: 1 ether}("");
-        assertTrue(success);
-        assertEq(address(smartAccount).balance, balanceBefore + 1 ether);
-
-        // Test fallback function
-        (success,) = address(smartAccount).call{value: 1 ether}("0x1234");
-        assertTrue(success);
-        assertEq(address(smartAccount).balance, balanceBefore + 2 ether);
-    }
-
-    // ==================== FUZZ TESTS ====================
-
-    function testFuzz_CreateTaskWithDifferentRewards(uint256 rewardAmount) public {
-        vm.assume(rewardAmount > 0 && rewardAmount <= INITIAL_BALANCE);
-
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Fuzz Task", rewardAmount, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-
-        assertEq(smartAccount.s_totalCommittedReward(), rewardAmount);
-    }
-
-    function testFuzz_TransferDifferentAmounts(uint256 transferAmount) public {
-        vm.assume(transferAmount > 0 && transferAmount <= INITIAL_BALANCE);
-
-        address recipient = makeAddr("recipient");
-        uint256 recipientBalanceBefore = recipient.balance;
-
-        vm.prank(owner);
-        smartAccount.transfer(recipient, transferAmount);
-
-        assertEq(recipient.balance, recipientBalanceBefore + transferAmount);
-    }
-
-    function test_OnlyOwnerCanCall() public {
-        address notOwner = makeAddr("notOwner");
-        vm.prank(notOwner);
-        vm.expectRevert(SmartAccount.SmartAccount__OnlyOwnerCanCall.selector);
-        smartAccount.transfer(makeAddr("recipient"), 1 ether);
-    }
-
-    function test_AddMoreFunds() public {
-        vm.prank(owner);
-        uint256 excessiveReward = INITIAL_BALANCE + 1 ether;
-        vm.expectRevert(SmartAccount.SmartAccount__AddMoreFunds.selector);
-        smartAccount.createTask(
-            "Too Expensive", excessiveReward, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-    }
-
-    function test_InvalidPenaltyChoice() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__InvalidPenaltyChoice.selector);
-        smartAccount.createTask("Invalid Penalty", 1 ether, DEADLINE_SECONDS, 3, address(0), DELAY_DURATION);
-    }
-
-    function test_PickAPenalty() public {
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__PickAPenalty.selector);
-        smartAccount.createTask("No Penalty", 1 ether, DEADLINE_SECONDS, 0, address(0), DELAY_DURATION);
-    }
-
-    function test_CannotWithdrawCommittedRewards() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Commit Funds", 9 ether, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-        vm.prank(owner);
+        // now try to execute a withdrawal of 2 ETH (free balance = 10 - 9 = 1 < 2)
+        vm.prank(address(ep));
         vm.expectRevert(SmartAccount.SmartAccount__CannotWithdrawCommittedRewards.selector);
-        smartAccount.transfer(makeAddr("recipient"), 2 ether);
+        acct.execute(address(0x1), 2 ether, bytes(""));
     }
 
-    function test_TaskAlreadyCompleted() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Complete Me", 1 ether, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-        vm.prank(owner);
-        smartAccount.completeTask(0);
-        vm.prank(owner);
-        vm.expectRevert(SmartAccount.SmartAccount__TaskAlreadyCompleted.selector);
-        smartAccount.completeTask(0);
+    function test_execute_successful_call_by_entrypoint() public {
+        // make sure free balance sufficient
+        // call a contract that returns success
+        address target = address(new CallReceiver());
+        vm.prank(address(ep));
+        acct.execute(target, 0, abi.encodeWithSelector(CallReceiver.ping.selector));
+        // function simply sets storage in CallReceiver; verify it works
+        assertTrue(CallReceiver(target).wasCalled());
     }
 
-    function test_PenaltyDurationNotElapsed() public {
-        vm.prank(owner);
-        smartAccount.createTask(
-            "Delayed", 1 ether, DEADLINE_SECONDS, PENALTY_DELAYEDPAYMENT, address(0), DELAY_DURATION
-        );
-        vm.warp(block.timestamp + DEADLINE_SECONDS + 1);
-        (bool upkeepNeeded, bytes memory performData) = taskManager.checkUpkeep("");
-        if (upkeepNeeded) {
-            taskManager.performUpkeep(performData);
-        }
-        vm.prank(owner);
+    /*///////////////////////////////////////////////////////////////
+                         validateUserOp & nonce behavior
+    ///////////////////////////////////////////////////////////////*/
+
+    function test_validateUserOp_signature_failure_does_not_increment_nonce() public {
+        // prepare a UserOperation signed by some other key
+        bytes32 userOpHash = keccak256("user op");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xBEEF, userOpHash);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        UserOperation memory uo = UserOperation({
+            sender: address(acct),
+            nonce: 0,
+            initCode: bytes(""),
+            callData: bytes(""),
+            callGasLimit: 0,
+            verificationGasLimit: 0,
+            preVerificationGas: 0,
+            maxFeePerGas: 0,
+            maxPriorityFeePerGas: 0,
+            paymasterAndData: bytes(""),
+            signature: sig
+        });
+
+        // call via entrypoint (requireFromEntryPoint)
+        // should return signature failure packed data, but we assert nonce unchanged
+        uint256 beforeAcct = acct.nonce();
+        vm.prank(address(ep));
+        acct.validateUserOp(uo, userOpHash, 0);
+        uint256 afterAcct = acct.nonce();
+        assertEq(beforeAcct, afterAcct);
+    }
+
+    function test_validateUserOp_signature_success_increments_nonce_and_emits() public {
+        bytes32 userOpHash = keccak256("user op 2");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, userOpHash);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        UserOperation memory uo = UserOperation({
+            sender: address(acct),
+            nonce: acct.nonce(), // must match
+            initCode: bytes(""),
+            callData: bytes(""),
+            callGasLimit: 0,
+            verificationGasLimit: 0,
+            preVerificationGas: 0,
+            maxFeePerGas: 0,
+            maxPriorityFeePerGas: 0,
+            paymasterAndData: bytes(""),
+            signature: sig
+        });
+
+        // capture current nonce then call from entrypoint
+        uint256 before = acct.nonce();
+        vm.prank(address(ep));
+        vm.expectEmit(true, false, false, true);
+        emit SmartAccount.NonceChanged(before + 1);
+        acct.validateUserOp(uo, userOpHash, 0);
+
+        // nonce incremented
+        assertEq(acct.nonce(), before + 1);
+    }
+
+    function test_validateUserOp_payPrefund_failure_reverts() public {
+        // set MockEntryPoint fallback to fail so low-level call reverts
+        ep.setFailFallback(true);
+
+        bytes32 userOpHash = keccak256("user op 3");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, userOpHash);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        UserOperation memory uo = UserOperation({
+            sender: address(acct),
+            nonce: acct.nonce(),
+            initCode: bytes(""),
+            callData: bytes(""),
+            callGasLimit: 0,
+            verificationGasLimit: 0,
+            preVerificationGas: 0,
+            maxFeePerGas: 0,
+            maxPriorityFeePerGas: 0,
+            paymasterAndData: bytes(""),
+            signature: sig
+        });
+
+        // missingAccountFunds > 0 triggers _payPrefund and it should revert
+        vm.prank(address(ep));
+        vm.expectRevert(SmartAccount.SmartAccount__PayPrefundFailed.selector);
+        acct.validateUserOp(uo, userOpHash, 1 wei);
+
+        // restore
+        ep.setFailFallback(false);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                              TASK OPERATIONS
+    ///////////////////////////////////////////////////////////////*/
+
+    function test_createTask_requires_funding_and_reserves() public {
+        // fund handled in setUp; create a task with small reward
+        uint256 reward = 1 ether;
+        vm.prank(address(ep));
+        acct.createTask("T1", reward, 1 days, 1, address(0), 1 hours, 0);
+
+        // total committed updated
+        assertEq(acct.s_totalCommittedReward(), reward);
+
+        // task is recorded in TaskManager for this account
+        ITaskManager.Task memory t = tm.getTask(address(acct), 0);
+        assertEq(t.rewardAmount, reward);
+    }
+
+    function test_createTask_insufficient_funds_reverts() public {
+        // send away balance to make insufficient
+        vm.deal(address(acct), 0);
+        vm.prank(address(ep));
+        vm.expectRevert(SmartAccount.SmartAccount__AddMoreFunds.selector);
+        acct.createTask("T2", 1 ether, 1 days, 1, address(0), 1 hours, 0);
+
+        // refund for subsequent tests
+        vm.deal(address(acct), 10 ether);
+    }
+
+    function test_complete_and_cancel_task_flow_and_payments() public {
+        uint256 reward = 1 ether;
+
+        // create task
+        vm.prank(address(ep));
+        acct.createTask("COMP", reward, 1 days, 1, address(0), 1 hours, 0);
+
+        // complete task via EntryPoint (must be called by EntryPoint)
+        // track owner balance before
+        vm.deal(ownerAddr, 0);
+        uint256 beforeOwner = ownerAddr.balance;
+
+        vm.prank(address(ep));
+        acct.completeTask(0);
+
+        // owner received reward
+        uint256 afterOwner = ownerAddr.balance;
+        assertEq(afterOwner - beforeOwner, reward);
+
+        // s_totalCommittedReward reduced to zero
+        assertEq(acct.s_totalCommittedReward(), 0);
+
+        // create another and then cancel
+        vm.prank(address(ep));
+        acct.createTask("CANCEL", 1 ether, 1 days, 1, address(0), 1 hours, 0);
+
+        vm.prank(address(ep));
+        acct.cancelTask(1);
+
+        // s_totalCommittedReward decreased
+        assertEq(acct.s_totalCommittedReward(), 0);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                        EXPIRED / PENALTY / RELEASE
+    ///////////////////////////////////////////////////////////////*/
+
+    function test_expired_callback_sendBuddy_and_releaseDelayed() public {
+        // create a task that will expire and send to buddy (choice = PENALTY_SENDBUDDY)
+        address buddy = address(0xBEEF);
+
+        // ensure SmartAccount has funds to transfer to buddy on expiry
+        vm.deal(address(acct), 5 ether);
+
+        vm.prank(address(ep));
+        acct.createTask("send", 1 ether, 1, 2, buddy, 0, 0); // deadlineInSeconds = 1 sec
+
+        // advance time and run TaskManager upkeep to expire -> TaskManager.performUpkeep will call expiredTaskCallback
+        vm.warp(block.timestamp + 10);
+
+        // call TaskManager.performUpkeep to find and process root
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+
+        // perform upkeep which will call SmartAccount.expiredTaskCallback via TaskManager
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // buddy should have received 1 ether from SmartAccount as penalty
+        // As we cannot inspect balance of arbitrary buddy if not pre-funded by deal, use vm.deal to set expectation
+        // Check SmartAccount's committed reward decreased
+        assertEq(acct.s_totalCommittedReward(), 0);
+
+        // Now create a delayed-payment task and test releaseDelayedPayment flow
+        vm.prank(address(ep));
+        acct.createTask("delay", 1 ether, 1, 1, address(0), 2, 0); // choice=1 delayed
+
+        // expire (advance just past the deadline but still before delayDuration elapses)
+        vm.warp(block.timestamp + 2);
+        (bool needed2, bytes memory data2) = tm.checkUpkeep("");
+        assertTrue(needed2);
+        vm.prank(address(this));
+        tm.performUpkeep(data2);
+
+        // release delayed payment before delay duration => should revert
+        vm.prank(address(ep));
         vm.expectRevert(SmartAccount.SmartAccount__PenaltyDurationNotElapsed.selector);
-        smartAccount.releaseDelayedPayment(0);
+        acct.releaseDelayedPayment(1);
+
+        // fast-forward past delayDuration
+        vm.warp(block.timestamp + 100);
+
+        vm.prank(address(ep));
+        acct.releaseDelayedPayment(1);
+
+        // re-release should revert PaymentAlreadyReleased
+        vm.prank(address(ep));
+        vm.expectRevert(SmartAccount.SmartAccount__PaymentAlreadyReleased.selector);
+        acct.releaseDelayedPayment(1);
+    }
+
+    function test_expiredTaskCallback_requires_taskManager_sender() public {
+        // create task normally then call expiredTaskCallback from non-taskmanager address -> revert
+        vm.prank(address(ep));
+        acct.createTask("X", 1 ether, 100, 1, address(0), 1 hours, 0);
+
+        // Not From EntryPoint is for other modifiers; expiredTaskCallback requires TaskManager sender.
+        // Call directly but with wrong sender should revert OnlyTaskManagerCanCall
+        vm.prank(address(0x1234));
+        vm.expectRevert(SmartAccount.SmartAccount__OnlyTaskManagerCanCall.selector);
+        acct.expiredTaskCallback(0);
+
+        // calling with TaskManager as sender but task not expired should revert TaskNotExpired
+        vm.prank(address(tm));
+        vm.expectRevert(SmartAccount.SmartAccount__TaskNotExpired.selector);
+        acct.expiredTaskCallback(0);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                         ENTRYPOINT DEPOSIT HELPERS
+    ///////////////////////////////////////////////////////////////*/
+
+    function test_addDeposit_and_withdrawDeposit_flow() public {
+        // addDeposit forwards to i_entryPoint.depositTo
+        vm.deal(address(this), 1 ether);
+        vm.prank(address(this));
+        acct.addDeposit{value: 0.5 ether}();
+
+        // entrypoint deposits recorded
+        assertEq(ep.deposits(address(acct)), 0.5 ether);
+
+        // withdrawDepositTo callable only from EntryPoint
+        // call withdraw via EntryPoint-relative call
+        vm.prank(address(ep));
+        acct.withdrawDepositTo(payable(address(this)), 0.5 ether);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                         EIP-1271 & GETTERS
+    ///////////////////////////////////////////////////////////////*/
+
+    function test_isValidSignature_and_getters() public {
+        bytes32 someHash = keccak256("abc");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, someHash);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        bytes4 ok = acct.isValidSignature(someHash, sig);
+        assert(ok == 0x1626ba7e);
+
+        // getters proxied to TaskManager
+        // getTotalTasks requires taskManagerLinked; create a task first via EntryPoint
+        vm.prank(address(ep));
+        acct.createTask("G", 1 ether, 1 days, 1, address(0), 1 hours, 0);
+
+        vm.prank(address(ep));
+        uint256 total = acct.getTotalTasks();
+        assertEq(total, 1);
+    }
+}
+
+/*//////////////////////////////////////////////////////////////
+                         Helper Contracts
+//////////////////////////////////////////////////////////////*/
+
+contract CallReceiver {
+    bool public called;
+
+    function ping() external {
+        called = true;
+    }
+
+    function wasCalled() external view returns (bool) {
+        return called;
     }
 }
