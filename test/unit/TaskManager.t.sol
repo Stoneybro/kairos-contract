@@ -55,6 +55,7 @@ contract MockAccountSuccess is ISmartAccount {
 
     // stub for IAccount - not used in tests
     function validateUserOp(UserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
+    pure
         external
         returns (uint256 validationData)
     {
@@ -92,13 +93,14 @@ contract MockAccountRevert is ISmartAccount {
     }
 
     // expired callback that reverts
-    function expiredTaskCallback(uint256) external override {
+    function expiredTaskCallback(uint256) external pure override {
         revert("callback revert");
     }
 
     // stubs for IAccount
     function validateUserOp(UserOperation calldata userOp, bytes32 userOpHash, uint256 missingAccountFunds)
         external
+        pure
         returns (uint256 validationData)
     {
         userOp;
@@ -226,7 +228,7 @@ contract TaskManagerTest is Test {
 
         // try to complete canceled -> should revert with has been canceled
         vm.prank(address(acc));
-        vm.expectRevert(TaskManager.TaskManager__TaskHasBeenCanceled.selector);
+        vm.expectRevert(TaskManager.TaskManager__TaskIsNotPending.selector);
         tm.completeTask(id);
     }
 
@@ -332,6 +334,545 @@ contract TaskManagerTest is Test {
         vm.expectRevert(TaskManager.TaskManager__AlreadyReleased.selector);
         tm.releaseDelayedPayment(id);
     }
+    // Additional test functions to add to TaskManagerTest contract
+
+    /*///////////////////////////////////////////////////////////////
+                    HEAP IMPLEMENTATION STRESS TESTS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testHeap_multiple_accounts_ordering() public {
+        MockAccountSuccess acc2 = new MockAccountSuccess(tm);
+
+        // Create tasks with different deadlines across accounts
+        vm.prank(address(acc));
+        uint256 id1 = tm.createTask("late", 1, 100, 1, 1, address(0x1), 0); // deadline: now + 100
+
+        vm.prank(address(acc2));
+        uint256 id2 = tm.createTask("early", 1, 50, 1, 1, address(0x1), 0); // deadline: now + 50
+
+        vm.prank(address(acc));
+        uint256 id3 = tm.createTask("earliest", 1, 10, 1, 1, address(0x1), 0); // deadline: now + 10
+
+        // Advance past earliest deadline
+        vm.warp(block.timestamp + 15);
+
+        // First upkeep should process id3 (earliest deadline)
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+        (address rootAccount, uint256 rootId) = abi.decode(data, (address, uint256));
+        assertEq(rootAccount, address(acc));
+        assertEq(rootId, id3);
+
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // Advance past second deadline
+        vm.warp(block.timestamp + 45); // now at original + 60
+
+        // Next upkeep should process id2
+        (bool needed2, bytes memory data2) = tm.checkUpkeep("");
+        assertTrue(needed2);
+        (address rootAccount2, uint256 rootId2) = abi.decode(data2, (address, uint256));
+        assertEq(rootAccount2, address(acc2));
+        assertEq(rootId2, id2);
+    }
+
+    function testHeap_remove_from_middle() public {
+        // Create 3 tasks with deadlines: 10, 20, 30
+        vm.prank(address(acc));
+        uint256 id1 = tm.createTask("early", 1, 10, 1, 1, address(0x1), 0);
+
+        vm.prank(address(acc));
+        uint256 id2 = tm.createTask("middle", 1, 20, 1, 1, address(0x1), 0);
+
+        vm.prank(address(acc));
+        uint256 id3 = tm.createTask("late", 1, 30, 1, 1, address(0x1), 0);
+
+        // Cancel the middle one (should remove from heap)
+        vm.prank(address(acc));
+        tm.cancelTask(id2);
+
+        // Advance past first deadline
+        vm.warp(block.timestamp + 15);
+
+        // Should still process id1 correctly
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+        (address rootAccount, uint256 rootId) = abi.decode(data, (address, uint256));
+        assertEq(rootAccount, address(acc));
+        assertEq(rootId, id1);
+    }
+
+    function testHeap_empty_after_all_processed() public {
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("single", 1, 1, 1, 1, address(0x1), 0);
+
+        vm.warp(block.timestamp + 10);
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // Heap should be empty now
+        (bool needed2,) = tm.checkUpkeep("");
+        assertFalse(needed2);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    STATUS ARRAY EDGE CASES
+    ///////////////////////////////////////////////////////////////*/
+
+    function testStatusArrays_pagination_edge_cases() public {
+        // Test pagination with start >= total
+        ITaskManager.Task[] memory emptyResult =
+            tm.getTasksByStatus(address(acc), ITaskManager.TaskStatus.PENDING, 100, 10);
+        assertEq(emptyResult.length, 0);
+
+        // Test with limit = 0
+        ITaskManager.Task[] memory zeroLimit = tm.getTasksByStatus(address(acc), ITaskManager.TaskStatus.PENDING, 0, 0);
+        assertEq(zeroLimit.length, 0);
+
+        // Create some tasks and test boundary pagination
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(address(acc));
+            tm.createTask("test", 1, 1 days + i, 1, 1, address(0x1), 0);
+        }
+
+        // Test start at last element
+        ITaskManager.Task[] memory lastElement =
+            tm.getTasksByStatus(address(acc), ITaskManager.TaskStatus.PENDING, 4, 10);
+        assertEq(lastElement.length, 1);
+
+        // Test limit exceeding remaining
+        ITaskManager.Task[] memory exceedingLimit =
+            tm.getTasksByStatus(address(acc), ITaskManager.TaskStatus.PENDING, 3, 10);
+        assertEq(exceedingLimit.length, 2); // only 2 remaining from index 3
+    }
+
+    function testTaskCountsByStatus_comprehensive() public {
+        // Create tasks in different statuses
+        vm.prank(address(acc));
+        uint256 id1 = tm.createTask("pending1", 1, 1 days, 1, 1, address(0x1), 0);
+
+        vm.prank(address(acc));
+        uint256 id2 = tm.createTask("pending2", 1, 1 days, 1, 1, address(0x1), 0);
+
+        vm.prank(address(acc));
+        uint256 id3 = tm.createTask("to_complete", 1, 1 days, 1, 1, address(0x1), 0);
+
+        vm.prank(address(acc));
+        uint256 id4 = tm.createTask("to_cancel", 1, 1 days, 1, 1, address(0x1), 0);
+
+        // Complete and cancel some
+        vm.prank(address(acc));
+        tm.completeTask(id3);
+
+        vm.prank(address(acc));
+        tm.cancelTask(id4);
+
+        uint256[] memory counts = tm.getTaskCountsByStatus(address(acc));
+
+        // Check counts: PENDING=2, COMPLETED=1, CANCELED=1, EXPIRED=0
+        assertEq(counts[uint8(ITaskManager.TaskStatus.PENDING)], 2);
+        assertEq(counts[uint8(ITaskManager.TaskStatus.COMPLETED)], 1);
+        assertEq(counts[uint8(ITaskManager.TaskStatus.CANCELED)], 1);
+        assertEq(counts[uint8(ITaskManager.TaskStatus.EXPIRED)], 0);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    DELAYED PAYMENT COMPREHENSIVE
+    ///////////////////////////////////////////////////////////////*/
+
+    function testDelayedPayment_full_lifecycle() public {
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("delayed_test", 1, 5, 1, 10, address(0x1), 0); // expire in 5s, delay 10s
+
+        // Check task is pending
+        ITaskManager.Task memory task = tm.getTask(address(acc), id);
+        assertEq(uint8(task.status), uint8(ITaskManager.TaskStatus.PENDING));
+        assertFalse(task.delayedRewardReleased);
+
+        // Expire the task
+        vm.warp(block.timestamp + 7);
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // Task should now be expired
+        task = tm.getTask(address(acc), id);
+        assertEq(uint8(task.status), uint8(ITaskManager.TaskStatus.EXPIRED));
+
+        // Try to release before delay period - should revert in SmartAccount
+        // (We can't test this directly from TaskManager, but the flow would fail)
+
+        // Release delayed payment after expiry
+        vm.prank(address(acc));
+        tm.releaseDelayedPayment(id);
+
+        // Check flag is set
+        task = tm.getTask(address(acc), id);
+        assertTrue(task.delayedRewardReleased);
+    }
+
+    function testDelayedPayment_wrong_choice_reverts() public {
+        // Create SENDBUDDY task (choice=2) and try delayed payment release
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("sendbuddy", 1, 1, 2, 0, alice, 0);
+
+        // Expire it
+        vm.warp(block.timestamp + 5);
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // Try to release delayed payment on non-delayed task
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__InvalidPenaltyConfig.selector);
+        tm.releaseDelayedPayment(id);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    AUTOMATION INTERFACE TESTS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testCheckUpkeep_empty_heap() public view {
+        // No tasks created, heap is empty
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertFalse(needed);
+        assertEq(data.length, 0);
+    }
+
+    function testPerformUpkeep_stale_data() public {
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("test", 1, 5, 1, 1, address(0x1), 0);
+
+        // Get upkeep data
+        vm.warp(block.timestamp + 10);
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+
+        // Complete the task before performUpkeep
+        vm.prank(address(acc));
+        tm.completeTask(id);
+
+        // Now call performUpkeep with stale data - should handle gracefully
+        vm.prank(address(this));
+        tm.performUpkeep(data); // Should not revert, just return early
+    }
+
+    function testPerformUpkeep_wrong_root() public {
+        vm.prank(address(acc));
+        uint256 id1 = tm.createTask("first", 1, 5, 1, 1, address(0x1), 0);
+
+        vm.prank(address(acc));
+        uint256 id2 = tm.createTask("second", 1, 10, 1, 1, address(0x1), 0);
+
+        vm.warp(block.timestamp + 15);
+
+        // Create wrong performData
+        bytes memory wrongData = abi.encode(address(acc), id2); // id2 is not the root
+
+        vm.prank(address(this));
+        tm.performUpkeep(wrongData); // Should handle gracefully and not process
+
+        // id1 should still be pending (not processed)
+        ITaskManager.Task memory task = tm.getTask(address(acc), id1);
+        assertEq(uint8(task.status), uint8(ITaskManager.TaskStatus.PENDING));
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    INTERFACE COMPLIANCE TESTS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testSupportsInterface_comprehensive() public view {
+        // Test specific interface IDs
+        assertTrue(tm.supportsInterface(type(ITaskManager).interfaceId));
+        assertTrue(tm.supportsInterface(type(AutomationCompatibleInterface).interfaceId));
+        assertTrue(tm.supportsInterface(type(IERC165).interfaceId));
+
+        // Test invalid interface
+        assertFalse(tm.supportsInterface(bytes4(0xffffffff)));
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    TASK STATE VALIDATION
+    ///////////////////////////////////////////////////////////////*/
+
+    function testTaskExist_modifier() public {
+        // Try to get non-existent task
+        vm.expectRevert(TaskManager.TaskManager__TaskDoesntExist.selector);
+        tm.getTask(address(acc), 999);
+
+        // Try operations on non-existent task
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__TaskDoesntExist.selector);
+        tm.completeTask(999);
+
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__TaskDoesntExist.selector);
+        tm.cancelTask(999);
+
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__TaskDoesntExist.selector);
+        tm.releaseDelayedPayment(999);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    CONCURRENT TASK OPERATIONS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testConcurrentTasks_different_accounts() public {
+        MockAccountSuccess acc2 = new MockAccountSuccess(tm);
+
+        // Both accounts create tasks simultaneously
+        vm.prank(address(acc));
+        uint256 id1 = tm.createTask("acc1_task", 1 ether, 1 days, 1, 1 hours, address(0x1), 0);
+
+        vm.prank(address(acc2));
+        uint256 id2 = tm.createTask("acc2_task", 2 ether, 2 days, 2, 0, alice, 0);
+
+        // Verify isolation - each account has its own task counter starting from 0
+        assertEq(id1, 0);
+        assertEq(id2, 0);
+
+        // Verify task counts
+        assertEq(tm.getTotalTasks(address(acc)), 1);
+        assertEq(tm.getTotalTasks(address(acc2)), 1);
+
+        // Verify tasks are independent
+        ITaskManager.Task memory task1 = tm.getTask(address(acc), 0);
+        ITaskManager.Task memory task2 = tm.getTask(address(acc2), 0);
+
+        assertEq(task1.rewardAmount, 1 ether);
+        assertEq(task2.rewardAmount, 2 ether);
+    }
+
+    function testTaskStatusTransitions_comprehensive() public {
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("status_test", 1, 1 days, 1, 1 hours, address(0x1), 0);
+
+        // Initial state: PENDING
+        uint256[] memory initialCounts = tm.getTaskCountsByStatus(address(acc));
+        assertEq(initialCounts[uint8(ITaskManager.TaskStatus.PENDING)], 1);
+        assertEq(initialCounts[uint8(ITaskManager.TaskStatus.COMPLETED)], 0);
+        assertEq(initialCounts[uint8(ITaskManager.TaskStatus.CANCELED)], 0);
+        assertEq(initialCounts[uint8(ITaskManager.TaskStatus.EXPIRED)], 0);
+
+        // Complete task
+        vm.prank(address(acc));
+        tm.completeTask(id);
+
+        uint256[] memory completedCounts = tm.getTaskCountsByStatus(address(acc));
+        assertEq(completedCounts[uint8(ITaskManager.TaskStatus.PENDING)], 0);
+        assertEq(completedCounts[uint8(ITaskManager.TaskStatus.COMPLETED)], 1);
+
+        // Create another and cancel
+        vm.prank(address(acc));
+        uint256 id2 = tm.createTask("cancel_test", 1, 1 days, 1, 1 hours, address(0x1), 0);
+
+        vm.prank(address(acc));
+        tm.cancelTask(id2);
+
+        uint256[] memory mixedCounts = tm.getTaskCountsByStatus(address(acc));
+        assertEq(mixedCounts[uint8(ITaskManager.TaskStatus.PENDING)], 0);
+        assertEq(mixedCounts[uint8(ITaskManager.TaskStatus.COMPLETED)], 1);
+        assertEq(mixedCounts[uint8(ITaskManager.TaskStatus.CANCELED)], 1);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    HEAP CORRUPTION PREVENTION
+    ///////////////////////////////////////////////////////////////*/
+
+    function testHeap_large_dataset_integrity() public {
+        // Create many tasks to stress test heap
+        uint256[] memory taskIds = new uint256[](10);
+        uint256[] memory deadlines = new uint256[](10);
+
+        for (uint256 i = 0; i < 10; i++) {
+            deadlines[i] = block.timestamp + (i * 10) + 1; // stagger deadlines
+            vm.prank(address(acc));
+            taskIds[i] = tm.createTask(string(abi.encodePacked("task_", i)), 1, (i * 10) + 1, 1, 1, address(0x1), 0);
+        }
+
+        // Cancel some tasks randomly to test heap removal
+        vm.prank(address(acc));
+        tm.cancelTask(taskIds[3]);
+
+        vm.prank(address(acc));
+        tm.cancelTask(taskIds[7]);
+
+        vm.prank(address(acc));
+        tm.cancelTask(taskIds[1]);
+
+        // Process remaining tasks in order and verify heap maintains order
+        for (uint256 i = 0; i < 10; i++) {
+            if (i == 1 || i == 3 || i == 7) continue; // cancelled tasks
+
+            vm.warp(deadlines[i] + 1);
+            (bool needed, bytes memory data) = tm.checkUpkeep("");
+
+            if (needed) {
+                (address rootAccount, uint256 rootId) = abi.decode(data, (address, uint256));
+                assertEq(rootAccount, address(acc));
+                assertEq(rootId, taskIds[i]);
+
+                vm.prank(address(this));
+                tm.performUpkeep(data);
+            }
+        }
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    ERROR CONDITION COMPREHENSIVE
+    ///////////////////////////////////////////////////////////////*/
+
+    function testReleaseDelayedPayment_double_release() public {
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("double", 1, 1, 1, 1, address(0x1), 0);
+
+        // Expire
+        vm.warp(block.timestamp + 5);
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // First release
+        vm.prank(address(acc));
+        tm.releaseDelayedPayment(id);
+
+        // Second release should fail
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__AlreadyReleased.selector);
+        tm.releaseDelayedPayment(id);
+    }
+
+    function testTaskOperations_on_expired_tasks() public {
+        vm.prank(address(acc));
+        uint256 id = tm.createTask("expire_test", 1, 1, 1, 1, address(0x1), 0);
+
+        // Expire the task
+        vm.warp(block.timestamp + 5);
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        vm.prank(address(this));
+        tm.performUpkeep(data);
+
+        // Try to complete expired task
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__TaskIsNotPending.selector);
+        tm.completeTask(id);
+
+        // Try to cancel expired task
+        vm.prank(address(acc));
+        vm.expectRevert(TaskManager.TaskManager__TaskIsNotPending.selector);
+        tm.cancelTask(id);
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    BOUNDARY VALUE TESTS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testCreateTask_boundary_values() public {
+        // Test with very large reward amount
+        vm.prank(address(acc));
+        uint256 id1 = tm.createTask("large_reward", type(uint256).max, 1 days, 1, 1, address(0x1), 0);
+
+        ITaskManager.Task memory task = tm.getTask(address(acc), id1);
+        assertEq(task.rewardAmount, type(uint256).max);
+
+        // Test with minimum valid values
+        vm.prank(address(acc));
+        uint256 id2 = tm.createTask("min_values", 1, 1, 1, 1, address(0x1), 0);
+
+        task = tm.getTask(address(acc), id2);
+        assertEq(task.rewardAmount, 1);
+        assertEq(task.delayDuration, 1);
+    }
+
+    function testCreateTask_verification_method_values() public {
+        // Test all valid verification method values (0, 1, 2)
+        for (uint8 method = 0; method <= 2; method++) {
+            vm.prank(address(acc));
+            uint256 id = tm.createTask("verify_test", 1, 1 days, 1, 1, address(0x1), method);
+
+            ITaskManager.Task memory task = tm.getTask(address(acc), id);
+            assertEq(uint8(task.verificationMethod), method);
+        }
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    GAS OPTIMIZATION TESTS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testGasUsage_multiple_operations() public {
+        // Measure gas for creating multiple tasks
+        uint256 gasBefore = gasleft();
+
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(address(acc));
+            tm.createTask("gas_test", 1, 1 days + i, 1, 1, address(0x1), 0);
+        }
+
+        uint256 gasUsed = gasBefore - gasleft();
+        // Basic assertion that gas usage is reasonable (allow a higher budget on CI)
+        assertTrue(gasUsed < 2000000); // Less than 2M gas for 5 tasks
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    TASK DESCRIPTION EDGE CASES
+    ///////////////////////////////////////////////////////////////*/
+
+    function testCreateTask_long_description() public {
+        // Test with very long description
+        string memory longDesc = "";
+        for (uint256 i = 0; i < 100; i++) {
+            longDesc = string(abi.encodePacked(longDesc, "very long description "));
+        }
+
+        vm.prank(address(acc));
+        uint256 id = tm.createTask(longDesc, 1 ether, 1 days, 1, 1, address(0x1), 0);
+
+        ITaskManager.Task memory task = tm.getTask(address(acc), id);
+        assertEq(keccak256(bytes(task.description)), keccak256(bytes(longDesc)));
+    }
+
+    function testCreateTask_special_characters_description() public {
+        string memory specialDesc = unicode"Task with 特殊字符 and émojis 🎯 and newlines\n\tand tabs";
+
+        vm.prank(address(acc));
+        uint256 id = tm.createTask(specialDesc, 1 ether, 1 days, 1, 1, address(0x1), 0);
+
+        ITaskManager.Task memory task = tm.getTask(address(acc), id);
+        assertEq(keccak256(bytes(task.description)), keccak256(bytes(specialDesc)));
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                    REENTRANCY PROTECTION TESTS
+    ///////////////////////////////////////////////////////////////*/
+
+    function testReentrancy_protection_all_functions() public {
+        // Test that all external functions with nonReentrant work correctly
+        ReentrantTaskManager attacker = new ReentrantTaskManager(tm);
+
+        // The attacker will create a task; when performUpkeep is called later it
+        // will invoke the attacker's expiredTaskCallback which attempts to call
+        // back into TaskManager. That nested call should be blocked by
+        // ReentrancyGuard on performUpkeep.
+        attacker.attackCreateTask();
+
+        // advance time so the task is expired and performUpkeep will call back
+        vm.warp(block.timestamp + 10);
+
+        (bool needed, bytes memory data) = tm.checkUpkeep("");
+        assertTrue(needed);
+
+        // performUpkeep will catch the revert from the nested createTask and emit TaskExpiredCallFailure
+        vm.prank(address(this));
+        vm.expectEmit(true, false, false, false);
+        emit TaskManager.TaskExpiredCallFailure(address(attacker), 0);
+        tm.performUpkeep(data);
+    }
 
     /*///////////////////////////////////////////////////////////////
                             PAGINATION & COUNTS
@@ -366,7 +907,7 @@ contract TaskManagerTest is Test {
                             SUPPORTS INTERFACE
     ///////////////////////////////////////////////////////////////*/
 
-    function testSupportsInterface() public {
+    function testSupportsInterface() public view {
         bool s1 = tm.supportsInterface(type(ITaskManager).interfaceId);
         bool s2 = tm.supportsInterface(type(AutomationCompatibleInterface).interfaceId);
         bool s3 = tm.supportsInterface(type(IERC165).interfaceId);
@@ -405,5 +946,44 @@ contract TaskManagerTest is Test {
         (address rootAccount, uint256 rootId) = abi.decode(data2, (address, uint256));
         assertEq(rootAccount, address(acc));
         assertEq(rootId, a2);
+    }
+}
+/*///////////////////////////////////////////////////////////////
+                    HELPER CONTRACTS FOR ADVANCED TESTS
+///////////////////////////////////////////////////////////////*/
+
+contract ReentrantTaskManager {
+    TaskManager public tm;
+    bool public attacking;
+
+    constructor(TaskManager _tm) {
+        tm = _tm;
+    }
+
+    function attackCreateTask() external {
+        attacking = true;
+        // Create a task that will, during TaskManager.performUpkeep, call back into
+        // this contract. The callback will then try to create another task, causing
+        // a reentrant call to TaskManager.createTask.
+        tm.createTask("attack", 1, 1, 1, 1, address(0x1), 0);
+    }
+
+    // This will be called during the first createTask and try to create another
+    function expiredTaskCallback(uint256) external {
+        if (attacking) {
+            // This nested createTask should hit the nonReentrant guard in TaskManager
+            tm.createTask("reentrant", 1, 1, 1, 1, address(0x1), 0);
+        }
+    }
+
+    // Required interface implementations
+    function validateUserOp(UserOperation calldata, bytes32, uint256) external pure returns (uint256) {
+        return 0;
+    }
+
+    function execute(address, uint256, bytes calldata) external {}
+
+    function supportsInterface(bytes4) external pure returns (bool) {
+        return true;
     }
 }

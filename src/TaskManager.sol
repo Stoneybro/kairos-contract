@@ -75,6 +75,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     error TaskManager__TaskNotYetExpired();
     error TaskManager__InvalidChoice();
     error TaskManager__AlreadyReleased();
+    error TaskManager__TaskIsNotPending();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -252,7 +253,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
             delayDuration: delayDuration,
             buddy: buddy,
             delayedRewardReleased: false,
-            verificationMethod:VerificationMethod(verificationMethod)
+            verificationMethod: VerificationMethod(verificationMethod)
         });
 
         // Add to pending status array
@@ -279,7 +280,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         Task storage task = s_tasks[account][taskId];
 
         if (task.status == TaskStatus.COMPLETED) revert TaskManager__TaskAlreadyCompleted();
-        if (task.status != TaskStatus.PENDING) revert TaskManager__TaskHasBeenCanceled();
+        if (task.status != TaskStatus.PENDING) revert TaskManager__TaskIsNotPending();
 
         // update status, arrays and heap
         task.status = TaskStatus.COMPLETED;
@@ -297,7 +298,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         Task storage task = s_tasks[account][taskId];
 
         if (task.status == TaskStatus.CANCELED) revert TaskManager__TaskHasBeenCanceled();
-        if (task.status != TaskStatus.PENDING) revert TaskManager__TaskAlreadyCompleted();
+        if (task.status != TaskStatus.PENDING) revert TaskManager__TaskIsNotPending();
 
         task.status = TaskStatus.CANCELED;
         _moveTaskStatus(account, uint8(TaskStatus.PENDING), uint8(TaskStatus.CANCELED), taskId);
@@ -310,7 +311,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
      * @notice Perform upkeep to expire tasks.
      * @dev Removes expired tasks from heap and status arrays first, then calls account callback.
      */
-    function checkUpkeep(bytes calldata) external override view returns (bool upkeepNeeded, bytes memory performData) {
+    function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory performData) {
         if (s_heap.length == 0) return (false, "");
         HeapItem memory root = s_heap[0];
         upkeepNeeded = (block.timestamp > root.deadline && root.deadline != 0);
@@ -395,11 +396,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
      * @param account The account whose task counts are requested
      * @return counts An array where counts[i] = number of tasks with TaskStatus(i)
      */
-    function getTaskCountsByStatus(address account) 
-        external 
-        view 
-        returns (uint256[] memory counts) 
-    {
+    function getTaskCountsByStatus(address account) external view returns (uint256[] memory counts) {
         uint8 numStatuses = uint8(type(TaskStatus).max) + 1;
         counts = new uint256[](numStatuses);
 

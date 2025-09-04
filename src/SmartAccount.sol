@@ -183,9 +183,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
     /**
      * @notice EntryPoint calls this to validate a UserOperation.
-     * @dev This implementation recovers signer over an Ethereum signed message of `userOpHash`.
-     *      The client must sign the prefixed hash accordingly. If you prefer raw `userOpHash`,
-     *      change the recovery to `ECDSA.recover(userOpHash, signature)` and ensure the client matches.
+     * @dev This implementation recovers signer from the `userOpHash`.
      * @param userOp UserOperation provided by EntryPoint.
      * @param userOpHash Hash calculated by EntryPoint for this UserOperation.
      * @param missingAccountFunds Amount EntryPoint asks this account to prefund for execution.
@@ -202,13 +200,20 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
     /**
      * @dev Internal signature and nonce check.
-     *      Recovers signer from `toEthSignedMessageHash(userOpHash)`. See note above in `validateUserOp`.
+     *      Recovers signer from `userOpHash`.
      */
     function _validateSignature(UserOperation calldata userOp, bytes32 userOpHash)
         internal
         returns (uint256 validationData)
     {
-        address signer = ECDSA.recover(userOpHash, userOp.signature);
+        // Use tryRecover to avoid reverting on malformed signatures
+        (address signer, ECDSA.RecoverError err, bytes32 errorArg) = ECDSA.tryRecover(userOpHash, userOp.signature);
+        // silence unused variable warning
+        errorArg;
+        if (err != ECDSA.RecoverError.NoError) {
+            // malformed or empty signature -> signature failure
+            return _packValidationData(true, 0, 0);
+        }
 
         if (signer != s_owner) {
             // signature failure
@@ -262,8 +267,8 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         uint256 rewardAmount,
         uint256 deadlineInSeconds,
         uint8 choice,
-        address buddy,
         uint256 delayDuration,
+        address buddy,
         uint8 verificationMethod
     ) external requireFromEntryPoint taskManagerLinked contractFundedForTasks(rewardAmount) {
         if (choice == 0) revert SmartAccount__PickAPenalty();
