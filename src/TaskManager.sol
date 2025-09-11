@@ -222,6 +222,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
      * @dev Adds to heap and per-status array. Emits TaskCreated.
      */
     function createTask(
+        string calldata title,
         string calldata description,
         uint256 rewardAmount,
         uint256 deadlineInSeconds,
@@ -244,6 +245,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         // Store task
         s_tasks[account][newTaskId] = Task({
             id: newTaskId,
+            title:title,
             description: description,
             rewardAmount: rewardAmount,
             deadline: deadline,

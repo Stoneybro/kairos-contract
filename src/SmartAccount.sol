@@ -261,6 +261,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
      * @param delayDuration Duration in seconds for delayed payments.
      */
     function createTask(
+        string calldata title,
         string calldata description,
         uint256 rewardAmount,
         uint256 deadlineInSeconds,
@@ -276,7 +277,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         if (rewardAmount == 0) revert SmartAccount__RewardCannotBeZero();
         if (verificationMethod > 2) revert SmartAccount__InvalidVerificationMethod();
         uint256 taskId = taskManager.createTask(
-            description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy, verificationMethod
+           title, description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy, verificationMethod
         );
 
         // Reserve reward funds
@@ -298,9 +299,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
         if (task.rewardAmount > 0) {
             s_totalCommittedReward -= task.rewardAmount;
-            //remove this to let the funds go back to available balance
-            (bool success,) = payable(s_owner).call{value: task.rewardAmount}("");
-            if (!success) revert SmartAccount__TaskRewardPaymentFailed();
         }
 
         emit TaskCompleted(taskId);

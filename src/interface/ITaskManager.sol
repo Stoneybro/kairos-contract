@@ -19,6 +19,7 @@ interface ITaskManager is IERC165 {
 
     struct Task {
         uint256 id;
+        string title;
         string description;
         uint256 rewardAmount;
         uint256 deadline;
@@ -34,6 +35,7 @@ interface ITaskManager is IERC165 {
 
 
     function createTask(
+        string calldata title,
         string calldata description,
         uint256 rewardAmount,
         uint256 deadlineInSeconds,
