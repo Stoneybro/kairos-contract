@@ -38,7 +38,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     // Index mapping for tasks in the per-status arrays: account => taskId => index+1 (0 means absent)
     mapping(address => mapping(uint256 => uint256)) private s_taskIndexInStatus;
 
-    // Global min-heap of pending tasks (by deadline)
+    // Global min-heap of ACTIVE tasks (by deadline)
     struct HeapItem {
         address account;
         uint256 taskId;
@@ -75,7 +75,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     error TaskManager__TaskNotYetExpired();
     error TaskManager__InvalidChoice();
     error TaskManager__AlreadyReleased();
-    error TaskManager__TaskIsNotPending();
+    error TaskManager__TaskIsNotACTIVE();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -250,7 +250,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
             rewardAmount: rewardAmount,
             deadline: deadline,
             valid: true,
-            status: TaskStatus.PENDING,
+            status: TaskStatus.ACTIVE,
             choice: choice,
             delayDuration: delayDuration,
             buddy: buddy,
@@ -258,8 +258,8 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
             verificationMethod: VerificationMethod(verificationMethod)
         });
 
-        // Add to pending status array
-        _pushTaskToStatus(account, uint8(TaskStatus.PENDING), newTaskId);
+        // Add to ACTIVE status array
+        _pushTaskToStatus(account, uint8(TaskStatus.ACTIVE), newTaskId);
 
         // Push to heap for scheduling
         _heapPush(HeapItem({account: account, taskId: newTaskId, deadline: deadline}));
@@ -282,28 +282,28 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         Task storage task = s_tasks[account][taskId];
 
         if (task.status == TaskStatus.COMPLETED) revert TaskManager__TaskAlreadyCompleted();
-        if (task.status != TaskStatus.PENDING) revert TaskManager__TaskIsNotPending();
+        if (task.status != TaskStatus.ACTIVE) revert TaskManager__TaskIsNotACTIVE();
 
         // update status, arrays and heap
         task.status = TaskStatus.COMPLETED;
-        _moveTaskStatus(account, uint8(TaskStatus.PENDING), uint8(TaskStatus.COMPLETED), taskId);
+        _moveTaskStatus(account, uint8(TaskStatus.ACTIVE), uint8(TaskStatus.COMPLETED), taskId);
         _heapRemove(account, taskId);
 
         emit TaskCompleted(account, taskId);
     }
 
     /**
-     * @notice Cancel a pending task. Callable by the account that owns the task.
+     * @notice Cancel a ACTIVE task. Callable by the account that owns the task.
      */
     function cancelTask(uint256 taskId) external override nonReentrant taskExist(msg.sender, taskId) {
         address account = msg.sender;
         Task storage task = s_tasks[account][taskId];
 
         if (task.status == TaskStatus.CANCELED) revert TaskManager__TaskHasBeenCanceled();
-        if (task.status != TaskStatus.PENDING) revert TaskManager__TaskIsNotPending();
+        if (task.status != TaskStatus.ACTIVE) revert TaskManager__TaskIsNotACTIVE();
 
         task.status = TaskStatus.CANCELED;
-        _moveTaskStatus(account, uint8(TaskStatus.PENDING), uint8(TaskStatus.CANCELED), taskId);
+        _moveTaskStatus(account, uint8(TaskStatus.ACTIVE), uint8(TaskStatus.CANCELED), taskId);
         _heapRemove(account, taskId);
 
         emit TaskCanceled(account, taskId);
@@ -329,11 +329,11 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         if (root.account != account || root.taskId != taskId) return;
 
         Task storage task = s_tasks[account][taskId];
-        if (!(block.timestamp > task.deadline && task.status == TaskStatus.PENDING)) return;
+        if (!(block.timestamp > task.deadline && task.status == TaskStatus.ACTIVE)) return;
 
         // Transition first: mark expired, update status arrays and remove from heap
         task.status = TaskStatus.EXPIRED;
-        _moveTaskStatus(account, uint8(TaskStatus.PENDING), uint8(TaskStatus.EXPIRED), taskId);
+        _moveTaskStatus(account, uint8(TaskStatus.ACTIVE), uint8(TaskStatus.EXPIRED), taskId);
         _heapRemove(account, taskId);
 
         // After internal state is safe, call external account callback

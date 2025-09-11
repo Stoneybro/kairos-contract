@@ -5,7 +5,7 @@ import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 
 interface ITaskManager is IERC165 {
     enum TaskStatus {
-        PENDING,
+        ACTIVE,
         COMPLETED,
         CANCELED,
         EXPIRED
@@ -42,7 +42,7 @@ interface ITaskManager is IERC165 {
         uint8 choice,
         uint256 delayDuration,
         address buddy,
-        uint8 VerificationMethod
+        uint8 verificationMethod
     ) external returns (uint256);
 
     function completeTask(uint256 taskId) external;

@@ -8,6 +8,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {_packValidationData} from "@account-abstraction/contracts/core/Helpers.sol";
 import {IEntryPoint} from "@account-abstraction/contracts/interfaces/IEntryPoint.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ITaskManager} from "./interface/ITaskManager.sol";
 import {ISmartAccount} from "./interface/ISmartAccount.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -93,6 +94,16 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     error SmartAccount__RewardCannotBeZero();
     error SmartAccount__InvalidNonce();
     error SmartAccount__InvalidVerificationMethod();
+
+    /**
+     * @dev prevents initialization of the implementation
+     */
+    /*//////////////////////////////////////////////////////////////
+                                CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+    constructor() {
+        _disableInitializers();
+    }
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -199,6 +210,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
      * Uses EIP-712 typed data signing with domain separator per EIP-4337.
      * @param userOp UserOperation provided by EntryPoint.
      * @param userOpHash Hash calculated by EntryPoint for this UserOperation.
+     * @notice the entryPoint version used is 0.6
      */
     function _validateSignature(UserOperation calldata userOp, bytes32 userOpHash)
         internal
@@ -213,7 +225,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         bytes32 DOMAIN_TYPEHASH =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
         bytes32 nameHash = keccak256(bytes("EntryPoint"));
-        bytes32 versionHash = keccak256(bytes("0.6")); // match your EntryPoint version
+        bytes32 versionHash = keccak256(bytes("0.6"));
         bytes32 domainSeparator =
             keccak256(abi.encode(DOMAIN_TYPEHASH, nameHash, versionHash, block.chainid, address(i_entryPoint)));
 
@@ -277,7 +289,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         if (rewardAmount == 0) revert SmartAccount__RewardCannotBeZero();
         if (verificationMethod > 2) revert SmartAccount__InvalidVerificationMethod();
         uint256 taskId = taskManager.createTask(
-           title, description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy, verificationMethod
+            title, description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy, verificationMethod
         );
 
         // Reserve reward funds
@@ -286,7 +298,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     }
 
     /**
-     * @notice Mark an existing task as completed and pay the owner the reward.
+     * @notice Mark an existing task as completed and unlock the funds from the commited rewards.
      * @param taskId Task identifier returned by TaskManager when created.
      */
     function completeTask(uint256 taskId) external requireFromEntryPoint taskManagerLinked nonReentrant {
@@ -467,13 +479,15 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         if (ECDSA.recover(hash, signature) == s_owner) {
             return _EIP1271_MAGICVALUE;
         }
-        return 0xffffffff; // invalid
+        return bytes4(0); // invalid
     }
 
     /**
      * @notice Interface support declaration.
      */
-    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
-        return interfaceId == type(ISmartAccount).interfaceId;
-    }
+function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+    return interfaceId == type(ISmartAccount).interfaceId
+        || interfaceId == type(IAccount).interfaceId
+        || interfaceId == type(IERC165).interfaceId;
+}
 }

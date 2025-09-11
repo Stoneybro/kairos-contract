@@ -79,6 +79,8 @@ contract AccountFactory {
      * @notice Deploy a SmartAccount clone for the caller. Each caller may only deploy once.
      * @return account Address of the deployed clone.
      * @param owner is the EOA that will own the SmartAccount and must match the owner used when predicting the address off-chain.
+     * @notice front-running of owner deployment may occur, but the account remains safe because it will remain
+     * only accessible by the owner
      */
     function createAccount(address owner) external returns (address account) {
         // Prevent one user from deploying multiple accounts
