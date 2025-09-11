@@ -87,6 +87,11 @@
         "name": "buddy",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "verificationMethod",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "outputs": [
@@ -97,77 +102,6 @@
       }
     ],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "getAllTasks",
-    "inputs": [
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "tasks",
-        "type": "tuple[]",
-        "internalType": "struct ITaskManager.Task[]",
-        "components": [
-          {
-            "name": "id",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "description",
-            "type": "string",
-            "internalType": "string"
-          },
-          {
-            "name": "rewardAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "valid",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "status",
-            "type": "uint8",
-            "internalType": "enum ITaskManager.TaskStatus"
-          },
-          {
-            "name": "choice",
-            "type": "uint8",
-            "internalType": "uint8"
-          },
-          {
-            "name": "delayDuration",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "buddy",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "delayedRewardReleased",
-            "type": "bool",
-            "internalType": "bool"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -239,6 +173,121 @@
             "name": "delayedRewardReleased",
             "type": "bool",
             "internalType": "bool"
+          },
+          {
+            "name": "verificationMethod",
+            "type": "uint8",
+            "internalType": "enum ITaskManager.VerificationMethod"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getTaskCountsByStatus",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "counts",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getTasksByStatus",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "status",
+        "type": "uint8",
+        "internalType": "enum ITaskManager.TaskStatus"
+      },
+      {
+        "name": "start",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "limit",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "tuple[]",
+        "internalType": "struct ITaskManager.Task[]",
+        "components": [
+          {
+            "name": "id",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "description",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "rewardAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "valid",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum ITaskManager.TaskStatus"
+          },
+          {
+            "name": "choice",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "delayDuration",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "buddy",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "delayedRewardReleased",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "verificationMethod",
+            "type": "uint8",
+            "internalType": "enum ITaskManager.VerificationMethod"
           }
         ]
       }
@@ -292,45 +341,6 @@
   },
   {
     "type": "function",
-    "name": "s_nextDeadline",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "s_nextExpiringTaskAccount",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "s_nextExpiringTaskId",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "supportsInterface",
     "inputs": [
       {
@@ -353,6 +363,12 @@
     "name": "TaskCanceled",
     "inputs": [
       {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "taskId",
         "type": "uint256",
         "indexed": true,
@@ -366,6 +382,12 @@
     "name": "TaskCompleted",
     "inputs": [
       {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "taskId",
         "type": "uint256",
         "indexed": true,
@@ -378,6 +400,12 @@
     "type": "event",
     "name": "TaskCreated",
     "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
       {
         "name": "taskId",
         "type": "uint256",
@@ -404,6 +432,12 @@
     "name": "TaskDelayedPaymentReleased",
     "inputs": [
       {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "taskId",
         "type": "uint256",
         "indexed": true,
@@ -423,6 +457,12 @@
     "name": "TaskExpired",
     "inputs": [
       {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "taskId",
         "type": "uint256",
         "indexed": true,
@@ -436,6 +476,12 @@
     "name": "TaskExpiredCallFailure",
     "inputs": [
       {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "taskId",
         "type": "uint256",
         "indexed": true,
@@ -447,6 +493,11 @@
   {
     "type": "error",
     "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TaskManager__AlreadyReleased",
     "inputs": []
   },
   {
@@ -487,6 +538,11 @@
   {
     "type": "error",
     "name": "TaskManager__TaskHasExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TaskManager__TaskIsNotPending",
     "inputs": []
   },
   {

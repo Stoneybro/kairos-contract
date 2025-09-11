@@ -44,9 +44,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     /// @dev These funds must remain locked and not withdrawable by the account.
     uint256 public s_totalCommittedReward;
 
-    /// @notice Nonce for basic replay protection.
-    uint256 private _nonce;
-
     /// @notice Penalty type: delayed payment.
     uint8 public constant PENALTY_DELAYEDPAYMENT = 1;
 
@@ -147,7 +144,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         s_owner = owner;
         i_entryPoint = IEntryPoint(entryPoint);
         taskManager = _taskManager;
-        _nonce = 0;
 
         emit Initialized(owner, entryPoint, address(_taskManager));
     }
@@ -199,43 +195,45 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     }
 
     /**
-     * @dev Internal signature and nonce check.
-     *      Recovers signer from `userOpHash`.
+     * @dev Validate the UserOperation signature.
+     * Uses EIP-712 typed data signing with domain separator per EIP-4337.
+     * @param userOp UserOperation provided by EntryPoint.
+     * @param userOpHash Hash calculated by EntryPoint for this UserOperation.
      */
     function _validateSignature(UserOperation calldata userOp, bytes32 userOpHash)
         internal
         returns (uint256 validationData)
     {
-        // Use tryRecover to avoid reverting on malformed signatures
-        (address signer, ECDSA.RecoverError err, bytes32 errorArg) = ECDSA.tryRecover(userOpHash, userOp.signature);
-        // silence unused variable warning
-        errorArg;
+        // build struct hash: keccak256("UserOperation(bytes32 userOpHash)")
+        bytes32 TYPE_HASH = keccak256("UserOperation(bytes32 userOpHash)");
+        bytes32 structHash = keccak256(abi.encode(TYPE_HASH, userOpHash));
+
+        // domain separator per EIP-712:
+        // keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+        bytes32 DOMAIN_TYPEHASH =
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+        bytes32 nameHash = keccak256(bytes("EntryPoint"));
+        bytes32 versionHash = keccak256(bytes("0.6")); // match your EntryPoint version
+        bytes32 domainSeparator =
+            keccak256(abi.encode(DOMAIN_TYPEHASH, nameHash, versionHash, block.chainid, address(i_entryPoint)));
+
+        // EIP-712 digest
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+
+        // recover with tryRecover to avoid revert on malformed sig
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, userOp.signature);
         if (err != ECDSA.RecoverError.NoError) {
             // malformed or empty signature -> signature failure
             return _packValidationData(true, 0, 0);
         }
 
         if (signer != s_owner) {
-            // signature failure
+            // signature does not match owner
             return _packValidationData(true, 0, 0);
         }
 
-        // Nonce check and consume. `unchecked` saves gas because overflow is practically impossible.
-        if (userOp.nonce != _nonce) revert SmartAccount__InvalidNonce();
-        unchecked {
-            _nonce++;
-        }
-        emit NonceChanged(_nonce);
-
-        // Signature ok
+        // signature ok
         return _packValidationData(false, 0, 0);
-    }
-
-    /**
-     * @notice Current nonce value used for replay protection.
-     */
-    function nonce() public view returns (uint256) {
-        return _nonce;
     }
 
     /**
@@ -300,7 +298,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
         if (task.rewardAmount > 0) {
             s_totalCommittedReward -= task.rewardAmount;
-
+            //remove this to let the funds go back to available balance
             (bool success,) = payable(s_owner).call{value: task.rewardAmount}("");
             if (!success) revert SmartAccount__TaskRewardPaymentFailed();
         }
@@ -456,13 +454,22 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
     /**
      * @notice On-chain signature verification for contracts and off-chain tooling.
+     * @dev Supports both EIP-191 (`eth_sign`) and EIP-712 signatures.
+     *      Returns the EIP-1271 magic value if the signature is valid.
      * @param hash Hash that was signed.
      * @param signature Signature bytes.
      * @return magicValue _EIP1271_MAGICVALUE on success, 0x0 on failure.
      */
     function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4) {
-        address signer = ECDSA.recover(hash, signature);
-        return signer == s_owner ? _EIP1271_MAGICVALUE : bytes4(0);
+        // Try EIP-191 (`eth_sign`) prefix
+        if (ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(hash), signature) == s_owner) {
+            return _EIP1271_MAGICVALUE;
+        }
+        // Try EIP-712 (assume `hash` is already typed-data digest)
+        if (ECDSA.recover(hash, signature) == s_owner) {
+            return _EIP1271_MAGICVALUE;
+        }
+        return 0xffffffff; // invalid
     }
 
     /**

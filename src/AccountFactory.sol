@@ -51,6 +51,7 @@ contract AccountFactory {
     error AccountFactory__InitializationFailed();
     error AccountFactory__InvalidEntryPoint();
     error AccountFactory__InvalidTaskManager();
+    error AccountFactory__OnlyEntryPointCanCall();
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -77,44 +78,37 @@ contract AccountFactory {
     /**
      * @notice Deploy a SmartAccount clone for the caller. Each caller may only deploy once.
      * @return account Address of the deployed clone.
+     * @param owner is the EOA that will own the SmartAccount and must match the owner used when predicting the address off-chain.
      */
-    function createAccount() external returns (address account) {
-        // Disallow redeploy for the same user
-        if (userClones[msg.sender] != address(0)) revert AccountFactory__UserAlreadyHasAccount();
-        //prevents bad actors from pre-deploying with same salt
-        bytes32 salt = keccak256(abi.encodePacked(msg.sender));
+    function createAccount(address owner) external returns (address account) {
+        // Prevent one user from deploying multiple accounts
+        if (userClones[owner] != address(0)) revert AccountFactory__UserAlreadyHasAccount();
+        // Generate salt from owner address
+        bytes32 salt = keccak256(abi.encodePacked(owner));
 
-        // Defensive check: if code already at predicted address, treat as already deployed.
+        //check if account already deployed at predicted address
         address predicted = Clones.predictDeterministicAddress(implementation, salt);
         if (predicted.code.length != 0) revert AccountFactory__UserAlreadyHasAccount();
 
-        // Deploy clone with deterministic address
+        // Deploy clone
         account = Clones.cloneDeterministic(implementation, salt);
 
-        // Record mapping and emit for off-chain indexing
-        userClones[msg.sender] = account;
-        emit CloneCreated(account, msg.sender, salt);
-
-        // Initialize the clone. If initialization fails, surface a clear error.
-        try SmartAccount(payable(account)).initialize(msg.sender, i_entryPoint, i_taskManager) {
-            // initialization succeeded
+        // Initialize clone
+        try SmartAccount(payable(account)).initialize(owner, i_entryPoint, i_taskManager) {
+            // success
         } catch {
+            // revert whole tx if initialization failed
             revert AccountFactory__InitializationFailed();
         }
+
+        // Record mapping and emit after successful initialize
+        userClones[owner] = account;
+        emit CloneCreated(account, owner, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
                                PREDICTION HELPERS
     //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Predict the deterministic SmartAccount address for the caller.
-     * @dev Uses the same salt generation as `createAccount`.
-     */
-    function getAddress() external view returns (address predictedAddress) {
-        bytes32 salt = keccak256(abi.encodePacked(msg.sender));
-        predictedAddress = Clones.predictDeterministicAddress(implementation, salt);
-    }
 
     /**
      * @notice Predict the deterministic SmartAccount address for an arbitrary EOA.

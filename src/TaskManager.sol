@@ -187,7 +187,7 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     function _pushTaskToStatus(address account, uint8 status, uint256 taskId) internal {
         uint256[] storage arr = s_tasksByStatus[account][status];
         arr.push(taskId);
-        s_taskIndexInStatus[account][taskId] = arr.length; // store index+1
+        s_taskIndexInStatus[account][taskId] = arr.length; 
     }
 
     function _removeTaskFromStatus(address account, uint8 status, uint256 taskId) internal {
