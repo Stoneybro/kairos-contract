@@ -11,7 +11,7 @@ contract DeployAccountFactory is Script {
         HelperConfig.NetworkConfig memory networkConfig = helperConfig.getConfig();
         
         vm.startBroadcast();
-        AccountFactory factory = new AccountFactory(networkConfig.entryPoint, msg.sender,networkConfig.taskManager);
+        AccountFactory factory = new AccountFactory(networkConfig.entryPoint, networkConfig.taskManager);
         vm.stopBroadcast();
         
         console.log("AccountFactory deployed at:", address(factory));
@@ -22,11 +22,11 @@ contract DeployAccountFactory is Script {
         return (factory, helperConfig);
     }
     
-    function deployFactory(address entryPoint, address owner) external returns (AccountFactory) {
+    function deployFactory(address entryPoint) external returns (AccountFactory) {
          HelperConfig helperConfig = new HelperConfig();
         HelperConfig.NetworkConfig memory networkConfig = helperConfig.getConfig();
         vm.startBroadcast();
-        AccountFactory factory = new AccountFactory(entryPoint, owner,networkConfig.taskManager);
+        AccountFactory factory = new AccountFactory(entryPoint, networkConfig.taskManager);
         vm.stopBroadcast();
         
         return factory;

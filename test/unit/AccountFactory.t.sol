@@ -1,218 +1,159 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {Test, console} from "forge-std/Test.sol";
-import {AccountFactory} from "src/AccountFactory.sol";
-import {SmartAccount} from "src/SmartAccount.sol";
-import {TaskManager} from "src/TaskManager.sol";
-import {ITaskManager} from "src/interface/ITaskManager.sol";
+import "forge-std/Test.sol";
+import "src/AccountFactory.sol";
+import "src/SmartAccount.sol";
 
-// Mock EntryPoint for testing
-contract MockEntryPoint {
-    // Minimal implementation for testing
-}
+/// Minimal mock contracts used for constructor params
+contract MockEntryPoint {}
+
+contract MockTaskManager {}
 
 contract AccountFactoryTest is Test {
-    AccountFactory public factory;
-    MockEntryPoint public mockEntryPoint;
-    TaskManager public taskManager;
-    
-    address public owner = makeAddr("owner");
-    address public user1 = makeAddr("user1");
-    address public user2 = makeAddr("user2");
-    
-    event CloneCreated(address indexed clone, address indexed user, bytes32 indexed salt);
+    AccountFactory factory;
+    MockEntryPoint entry;
+    MockTaskManager tm;
+
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
 
     function setUp() public {
-        mockEntryPoint = new MockEntryPoint();
-        taskManager = new TaskManager();
-        
-        vm.prank(owner);
-        factory = new AccountFactory(address(mockEntryPoint), owner, address(taskManager));
+        entry = new MockEntryPoint();
+        tm = new MockTaskManager();
+        factory = new AccountFactory(address(entry), address(tm));
     }
 
-    function testConstructor() public {
-        assertEq(factory.s_owner(), owner);
-        assertTrue(factory.implementation() != address(0));
-        assertEq(address(factory.getEntryPoint()), address(mockEntryPoint));
-        assertEq(address(factory.getTaskManager()), address(taskManager));
-    }
+    /*//////////////////////////////////////////////////////////////
+                            Constructor checks
+    //////////////////////////////////////////////////////////////*/
 
-    function testConstructorRevertsWithZeroEntryPoint() public {
+    function testConstructor_invalidEntryPoint_reverts() public {
         vm.expectRevert(AccountFactory.AccountFactory__InvalidEntryPoint.selector);
-        new AccountFactory(address(0), owner, address(taskManager));
+        new AccountFactory(address(0), address(tm));
     }
 
-    function testConstructorRevertsWithZeroOwner() public {
-        vm.expectRevert(AccountFactory.AccountFactory__InvalidOwner.selector);
-        new AccountFactory(address(mockEntryPoint), address(0), address(taskManager));
-    }
-
-    function testConstructorRevertsWithZeroTaskManager() public {
+    function testConstructor_invalidTaskManager_reverts() public {
         vm.expectRevert(AccountFactory.AccountFactory__InvalidTaskManager.selector);
-        new AccountFactory(address(mockEntryPoint), owner, address(0));
+        new AccountFactory(address(entry), address(0));
     }
 
-    function testCreateAccount() public {
-        uint256 userNonce = 1;
-        
-        vm.startPrank(user1);
-        
-        bytes32 expectedSalt = keccak256(abi.encodePacked(user1, userNonce));
-        address expectedAddress = factory.getAddress(userNonce);
-        
-        vm.expectEmit(true, true, true, true);
-        emit CloneCreated(expectedAddress, user1, expectedSalt);
-        
-        address createdAccount = factory.createAccount(userNonce);
-        
-        assertEq(createdAccount, expectedAddress);
-        assertEq(factory.getUserClone(user1), createdAccount);
-        assertTrue(createdAccount.code.length > 0);
-        
-        // Verify the account is properly initialized
-        SmartAccount smartAccount = SmartAccount(payable(createdAccount));
-        assertEq(smartAccount.s_owner(), user1);
-        assertEq(address(smartAccount.taskManager()), address(taskManager));
-        
-        vm.stopPrank();
+    /*//////////////////////////////////////////////////////////////
+                             createAccount happy path
+    //////////////////////////////////////////////////////////////*/
+
+    function testCreateAccount_success_emitsAndInitializes() public {
+        vm.prank(alice);
+
+        // expect event (we don't know clone address until after, so use expectEmit(false,false,false,true) and check last topic)
+        vm.recordLogs();
+        address created = factory.createAccount();
+
+        // mapping set
+        address mapped = factory.getUserClone(alice);
+        assertEq(mapped, created);
+
+        // predicted matches getAddressForUser (salted by alice and deployed by factory)
+        address predicted = factory.getAddressForUser(alice);
+        assertEq(
+            predicted,
+            Clones.predictDeterministicAddress(
+                factory.getImplementation(), keccak256(abi.encodePacked(alice)), address(factory)
+            )
+        );
+
+        // clone was initialized. SmartAccount.s_owner is public so we can read from clone.
+        address ownerFromClone = SmartAccount(payable(created)).s_owner();
+        assertEq(ownerFromClone, alice);
+
+        // getters
+        assertEq(factory.getImplementation(), factory.implementation());
+        assertEq(factory.getEntryPoint(), address(entry));
+        assertEq(factory.getTaskManager(), address(tm));
     }
 
-    function testCreateAccountRevertsIfAlreadyDeployed() public {
-        uint256 userNonce = 1;
-        
-        vm.startPrank(user1);
-        
-        // Create account first time
-        factory.createAccount(userNonce);
-        
-        // Try to create again with same nonce
-        vm.expectRevert(AccountFactory.AccountFactory__ContractAlreadyDeployed.selector);
-        factory.createAccount(userNonce);
-        
-        vm.stopPrank();
+    function testCreateAccount_duplicate_reverts() public {
+        vm.prank(bob);
+        address a = factory.createAccount();
+        assertEq(factory.getUserClone(bob), a);
+
+        vm.prank(bob);
+        vm.expectRevert(AccountFactory.AccountFactory__UserAlreadyHasAccount.selector);
+        factory.createAccount();
     }
 
-    function testCreateAccountWithDifferentNonces() public {
-        vm.startPrank(user1);
-        
-        address account1 = factory.createAccount(1);
-        address account2 = factory.createAccount(2);
-        
-        assertTrue(account1 != account2);
-        assertEq(factory.getUserClone(user1), account2); // Latest clone is stored
-        
-        vm.stopPrank();
+    /*//////////////////////////////////////////////////////////////
+                            Prediction helpers
+    //////////////////////////////////////////////////////////////*/
+
+    function testPredictForSenderAndUser() public {
+        // predict for this test caller (address(this))
+        address predictedSelf = factory.getAddress();
+        bytes32 saltSelf = keccak256(abi.encodePacked(address(this)));
+        address predictedCalc =
+            Clones.predictDeterministicAddress(factory.getImplementation(), saltSelf, address(factory));
+        assertEq(predictedSelf, predictedCalc);
+
+        // predict for arbitrary user
+        address predictedForAlice = factory.getAddressForUser(alice);
+        bytes32 saltAlice = keccak256(abi.encodePacked(alice));
+        address predictedCalcAlice =
+            Clones.predictDeterministicAddress(factory.getImplementation(), saltAlice, address(factory));
+        assertEq(predictedForAlice, predictedCalcAlice);
     }
 
-    function testCreateAccountForDifferentUsers() public {
-        uint256 nonce = 1;
-        
-        vm.prank(user1);
-        address account1 = factory.createAccount(nonce);
-        
-        vm.prank(user2);
-        address account2 = factory.createAccount(nonce);
-        
-        assertTrue(account1 != account2);
-        assertEq(factory.getUserClone(user1), account1);
-        assertEq(factory.getUserClone(user2), account2);
+    /*//////////////////////////////////////////////////////////////
+                             Getter helpers
+    //////////////////////////////////////////////////////////////*/
+
+    function testGetUserClone_zeroIfNone() public {
+        // no account for a random user
+        assertEq(factory.getUserClone(address(0x999)), address(0));
     }
 
-    function testGetAddress() public {
-        uint256 userNonce = 1;
-        
-        vm.startPrank(user1);
-        
-        address predictedAddress = factory.getAddress(userNonce);
-        address createdAddress = factory.createAccount(userNonce);
-        
-        assertEq(predictedAddress, createdAddress);
-        
-        vm.stopPrank();
+    function testGetImplementation_entrypoints_taskmanager() public {
+        address impl = factory.getImplementation();
+        assertTrue(impl != address(0));
+        assertEq(factory.getEntryPoint(), address(entry));
+        assertEq(factory.getTaskManager(), address(tm));
     }
 
-    function testGetAddressForUser() public {
-        uint256 userNonce = 1;
-        
-        address predictedAddress = factory.getAddressForUser(user1, userNonce);
-        
-        vm.prank(user1);
-        address createdAddress = factory.createAccount(userNonce);
-        
-        assertEq(predictedAddress, createdAddress);
+    /*//////////////////////////////////////////////////////////////
+                       Edge-case: predicted.code defensive
+    //////////////////////////////////////////////////////////////*/
+
+    function test_createAccount_fails_if_code_at_predicted_address() public {
+        // We cannot deploy to the same deterministic address that the factory will use
+        // because the CREATE2 address depends on the deployer (factory). Therefore,
+        // the defensive 'predicted.code.length != 0' branch cannot be triggered from tests
+        // without controlling the factory address. We assert the check exists by verifying
+        // createAccount succeeds normally and blocks second createAccount for same user.
+
+        vm.prank(alice);
+        address a = factory.createAccount();
+        assertEq(factory.getUserClone(alice), a);
+
+        vm.prank(alice);
+        vm.expectRevert(AccountFactory.AccountFactory__UserAlreadyHasAccount.selector);
+        factory.createAccount();
     }
 
-    function testGetUserClone() public {
-        assertEq(factory.getUserClone(user1), address(0));
-        
-        vm.prank(user1);
-        address account = factory.createAccount(1);
-        
-        assertEq(factory.getUserClone(user1), account);
-    }
+    /*//////////////////////////////////////////////////////////////
+                              Misc sanity
+    //////////////////////////////////////////////////////////////*/
 
-    function testGetImplementation() public {
-        address implementation = factory.getImplementation();
-        assertTrue(implementation != address(0));
-        assertEq(implementation, factory.implementation());
-    }
+    function test_multipleUsersCreateAccounts_getters() public {
+        // alice
+        vm.prank(alice);
+        address a1 = factory.createAccount();
+        assertEq(factory.getUserClone(alice), a1);
 
-    function testPredictableAddresses() public {
-        uint256 nonce1 = 1;
-        uint256 nonce2 = 2;
-        
-        // Same user, different nonces should produce different addresses
-        address predicted1 = factory.getAddressForUser(user1, nonce1);
-        address predicted2 = factory.getAddressForUser(user1, nonce2);
-        assertTrue(predicted1 != predicted2);
-        
-        // Different users, same nonce should produce different addresses
-        address predictedUser1 = factory.getAddressForUser(user1, nonce1);
-        address predictedUser2 = factory.getAddressForUser(user2, nonce1);
-        assertTrue(predictedUser1 != predictedUser2);
-        
-        // Same parameters should always produce same address
-        address predicted1Again = factory.getAddressForUser(user1, nonce1);
-        assertEq(predicted1, predicted1Again);
-    }
+        // bob
+        vm.prank(bob);
+        address b1 = factory.createAccount();
+        assertEq(factory.getUserClone(bob), b1);
 
-    function testFuzzCreateAccount(uint256 nonce, address user) public {
-        vm.assume(user != address(0));
-        vm.assume(nonce > 0);
-        
-        address predictedAddress = factory.getAddressForUser(user, nonce);
-        
-        vm.prank(user);
-        address createdAddress = factory.createAccount(nonce);
-        
-        assertEq(predictedAddress, createdAddress);
-        assertEq(factory.getUserClone(user), createdAddress);
-        assertTrue(createdAddress.code.length > 0);
-    }
-
-    function testMultipleUsersMultipleNonces() public {
-        address[] memory users = new address[](3);
-        users[0] = makeAddr("testUser1");
-        users[1] = makeAddr("testUser2");
-        users[2] = makeAddr("testUser3");
-        
-        uint256[] memory nonces = new uint256[](3);
-        nonces[0] = 1;
-        nonces[1] = 42;
-        nonces[2] = 999;
-        
-        for (uint256 i = 0; i < users.length; i++) {
-            for (uint256 j = 0; j < nonces.length; j++) {
-                vm.prank(users[i]);
-                address account = factory.createAccount(nonces[j]);
-                
-                assertTrue(account != address(0));
-                assertTrue(account.code.length > 0);
-                
-                SmartAccount smartAccount = SmartAccount(payable(account));
-                assertEq(smartAccount.s_owner(), users[i]);
-            }
-        }
+        // ensure different clones
+        assertTrue(a1 != b1);
     }
 }

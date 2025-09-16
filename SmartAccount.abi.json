@@ -1,10 +1,48 @@
 [
   {
+    "type": "constructor",
+    "inputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "fallback",
     "stateMutability": "payable"
   },
   {
     "type": "receive",
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "PENALTY_DELAYEDPAYMENT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "PENALTY_SENDBUDDY",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "addDeposit",
+    "inputs": [],
+    "outputs": [],
     "stateMutability": "payable"
   },
   {
@@ -35,8 +73,26 @@
   },
   {
     "type": "function",
+    "name": "completeTaskWithAttestation",
+    "inputs": [
+      {
+        "name": "taskId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "createTask",
     "inputs": [
+      {
+        "name": "title",
+        "type": "string",
+        "internalType": "string"
+      },
       {
         "name": "description",
         "type": "string",
@@ -58,14 +114,19 @@
         "internalType": "uint8"
       },
       {
+        "name": "delayDuration",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "buddy",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "delayDuration",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "verificationMethod",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "outputs": [],
@@ -109,71 +170,6 @@
   },
   {
     "type": "function",
-    "name": "getAllTasks",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "tuple[]",
-        "internalType": "struct ITaskManager.Task[]",
-        "components": [
-          {
-            "name": "id",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "description",
-            "type": "string",
-            "internalType": "string"
-          },
-          {
-            "name": "rewardAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "valid",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "status",
-            "type": "uint8",
-            "internalType": "enum ITaskManager.TaskStatus"
-          },
-          {
-            "name": "choice",
-            "type": "uint8",
-            "internalType": "uint8"
-          },
-          {
-            "name": "delayDuration",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "buddy",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "delayedRewardReleased",
-            "type": "bool",
-            "internalType": "bool"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "getTask",
     "inputs": [
       {
@@ -194,6 +190,11 @@
             "internalType": "uint256"
           },
           {
+            "name": "title",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
             "name": "description",
             "type": "string",
             "internalType": "string"
@@ -237,6 +238,115 @@
             "name": "delayedRewardReleased",
             "type": "bool",
             "internalType": "bool"
+          },
+          {
+            "name": "verificationMethod",
+            "type": "uint8",
+            "internalType": "enum ITaskManager.VerificationMethod"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getTaskCountsByStatus",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getTasksByStatus",
+    "inputs": [
+      {
+        "name": "status",
+        "type": "uint8",
+        "internalType": "enum ITaskManager.TaskStatus"
+      },
+      {
+        "name": "start",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "limit",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple[]",
+        "internalType": "struct ITaskManager.Task[]",
+        "components": [
+          {
+            "name": "id",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "description",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "rewardAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "valid",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum ITaskManager.TaskStatus"
+          },
+          {
+            "name": "choice",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "delayDuration",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "buddy",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "delayedRewardReleased",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "verificationMethod",
+            "type": "uint8",
+            "internalType": "enum ITaskManager.VerificationMethod"
           }
         ]
       }
@@ -252,6 +362,19 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "i_entryPoint",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IEntryPoint"
       }
     ],
     "stateMutability": "view"
@@ -278,6 +401,30 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "isValidSignature",
+    "inputs": [
+      {
+        "name": "hash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "signature",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -352,30 +499,12 @@
   },
   {
     "type": "function",
-    "name": "transfer",
-    "inputs": [
-      {
-        "name": "destination",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "value",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "validateUserOp",
     "inputs": [
       {
         "name": "userOp",
         "type": "tuple",
-        "internalType": "struct PackedUserOperation",
+        "internalType": "struct UserOperation",
         "components": [
           {
             "name": "sender",
@@ -398,9 +527,14 @@
             "internalType": "bytes"
           },
           {
-            "name": "accountGasLimits",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "callGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "verificationGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
           },
           {
             "name": "preVerificationGas",
@@ -408,9 +542,14 @@
             "internalType": "uint256"
           },
           {
-            "name": "gasFees",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "maxFeePerGas",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxPriorityFeePerGas",
+            "type": "uint256",
+            "internalType": "uint256"
           },
           {
             "name": "paymasterAndData",
@@ -445,6 +584,24 @@
     "stateMutability": "nonpayable"
   },
   {
+    "type": "function",
+    "name": "withdrawDepositTo",
+    "inputs": [
+      {
+        "name": "withdrawAddress",
+        "type": "address",
+        "internalType": "address payable"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "event",
     "name": "DelayedPaymentReleased",
     "inputs": [
@@ -458,6 +615,44 @@
         "name": "rewardAmount",
         "type": "uint256",
         "indexed": true,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DepositAdded",
+    "inputs": [
+      {
+        "name": "sender",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DepositWithdrawn",
+    "inputs": [
+      {
+        "name": "withdrawAddress",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
         "internalType": "uint256"
       }
     ],
@@ -491,6 +686,44 @@
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Initialized",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "entryPoint",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "taskManager",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "NonceChanged",
+    "inputs": [
+      {
+        "name": "nonce",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -585,25 +818,6 @@
     "anonymous": false
   },
   {
-    "type": "event",
-    "name": "Transferred",
-    "inputs": [
-      {
-        "name": "to",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
     "type": "error",
     "name": "ECDSAInvalidSignature",
     "inputs": []
@@ -652,11 +866,6 @@
   },
   {
     "type": "error",
-    "name": "SmartAccount__CannotTransferZero",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "SmartAccount__CannotWithdrawCommittedRewards",
     "inputs": []
   },
@@ -673,7 +882,7 @@
   },
   {
     "type": "error",
-    "name": "SmartAccount__InsufficientCommittedReward",
+    "name": "SmartAccount__InvalidNonce",
     "inputs": []
   },
   {
@@ -688,17 +897,17 @@
   },
   {
     "type": "error",
+    "name": "SmartAccount__InvalidVerificationMethod",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "SmartAccount__NoTaskManagerLinked",
     "inputs": []
   },
   {
     "type": "error",
     "name": "SmartAccount__NotFromEntryPoint",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "SmartAccount__OnlyOwnerCanCall",
     "inputs": []
   },
   {
@@ -754,11 +963,6 @@
   {
     "type": "error",
     "name": "SmartAccount__TaskRewardPaymentFailed",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "SmartAccount__TransferFailed",
     "inputs": []
   }
 ]
