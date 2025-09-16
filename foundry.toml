@@ -7,7 +7,6 @@ optimizer_runs = 200
 evm_version = "shanghai"
 solc_version = "0.8.28"
 remappings = [
-    "@openzeppelin/contracts/security/ReentrancyGuard.sol=lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
     "@account-abstraction/contracts/=lib/account-abstraction/contracts/"
