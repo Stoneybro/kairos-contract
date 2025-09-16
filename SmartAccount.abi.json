@@ -1,5 +1,10 @@
 [
   {
+    "type": "constructor",
+    "inputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "fallback",
     "stateMutability": "payable"
   },
@@ -83,6 +88,11 @@
     "type": "function",
     "name": "createTask",
     "inputs": [
+      {
+        "name": "title",
+        "type": "string",
+        "internalType": "string"
+      },
       {
         "name": "description",
         "type": "string",
@@ -178,6 +188,11 @@
             "name": "id",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "internalType": "string"
           },
           {
             "name": "description",
@@ -277,6 +292,11 @@
             "name": "id",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "title",
+            "type": "string",
+            "internalType": "string"
           },
           {
             "name": "description",

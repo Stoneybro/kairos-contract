@@ -373,9 +373,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         taskManager.releaseDelayedPayment(taskId);
         s_totalCommittedReward -= task.rewardAmount;
 
-        (bool success,) = payable(s_owner).call{value: task.rewardAmount}("");
-        if (!success) revert SmartAccount__TaskRewardPaymentFailed();
-
         emit DelayedPaymentReleased(taskId, task.rewardAmount);
     }
 

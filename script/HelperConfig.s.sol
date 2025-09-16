@@ -60,11 +60,11 @@ contract HelperConfig is Script {
     }
 
     function getSepoliaEthConfig() public pure returns (NetworkConfig memory) {
-        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: BURNER_WALLET,taskManager:0x33156Bf5Dc961d5AFf26b1e4fc65623ef36BC352});
+        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: BURNER_WALLET,taskManager:0xbf35E4fa1603C52FdDCF3331d0D384334e5F5ac4});
     }
 
     function getBaseSepoliaEthConfig() public pure returns (NetworkConfig memory) {
-        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: SEPOLIA_WALLET,taskManager:0x33156Bf5Dc961d5AFf26b1e4fc65623ef36BC352});
+        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: SEPOLIA_WALLET,taskManager:0xbf35E4fa1603C52FdDCF3331d0D384334e5F5ac4});
     }
 
     function getAnvilEthConfig() public returns (NetworkConfig memory) {
