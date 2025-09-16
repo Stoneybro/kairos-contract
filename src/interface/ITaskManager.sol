@@ -29,10 +29,9 @@ interface ITaskManager is IERC165 {
         uint256 delayDuration;
         address buddy;
         bool delayedRewardReleased;
+        bool buddyPaymentSent; // NEW: Track buddy payment status
         VerificationMethod verificationMethod;
     }
-
-
 
     function createTask(
         string calldata title,
@@ -48,6 +47,7 @@ interface ITaskManager is IERC165 {
     function completeTask(uint256 taskId) external;
     function cancelTask(uint256 taskId) external;
     function releaseDelayedPayment(uint256 taskId) external;
+    function releaseBuddyPayment(uint256 taskId) external; // NEW: Manual buddy payment release
     function getTask(address account, uint256 taskId) external view returns (Task memory);
     function getTasksByStatus(address account, TaskStatus status, uint256 start, uint256 limit)
         external

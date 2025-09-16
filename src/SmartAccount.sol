@@ -20,11 +20,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @dev
  * - Integrates with an EntryPoint (ERC-4337) and a TaskManager for task lifecycle management.
  * - Tracks committed rewards to prevent draining funds reserved for tasks.
- * - Uses a simple nonce for replay protection.
- * - Exposes EIP-1271 style `isValidSignature` for on-chain/off-chain signature verification.
+ * - Exposes EIP-1271 style `isValidSignature` for off-chain signature verification.
  *
  * Security notes:
- * - ReentrancyGuard protects public functions that perform external calls and state changes.
  * - `s_totalCommittedReward` must always be <= contract balance. TaskManager must honor invariants.
  */
 contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard {
@@ -45,11 +43,21 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     /// @dev These funds must remain locked and not withdrawable by the account.
     uint256 public s_totalCommittedReward;
 
+    /*//////////////////////////////////////////////////////////////
+                                CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Gas limit for buddy transfers to prevent griefing attacks
+    uint256 private constant BUDDY_TRANSFER_GAS_LIMIT = 50000;
+
     /// @notice Penalty type: delayed payment.
     uint8 public constant PENALTY_DELAYEDPAYMENT = 1;
 
     /// @notice Penalty type: transfer to buddy.
     uint8 public constant PENALTY_SENDBUDDY = 2;
+
+    ///@notice Maximum deadline to prevent timestamp overflow (100 years from now)
+    uint256 private constant MAX_DEADLINE_DURATION = 365 days * 100;
 
     /// @notice EIP-1271 magic return value for valid signatures.
     bytes4 internal constant _EIP1271_MAGICVALUE = 0x1626ba7e;
@@ -58,17 +66,18 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event Initialized(address indexed owner, address indexed entryPoint, address taskManager);
-    event TaskCreated(uint256 indexed taskId, string description, uint256 rewardAmount);
-    event TaskCompleted(uint256 indexed taskId);
+    event Initialized(address indexed owner, address indexed entryPoint, address indexed taskManager);
+    event TaskCreated(uint256 indexed taskId, string indexed description, uint256 indexed rewardAmount);
+    event TaskCompleted(uint256 indexed taskId, uint256 indexed rewardAmount);
     event TaskCanceled(uint256 indexed taskId);
     event TaskExpired(uint256 indexed taskId);
     event DurationPenaltyApplied(uint256 indexed taskId, uint256 indexed penaltyDuration);
     event DelayedPaymentReleased(uint256 indexed taskId, uint256 indexed rewardAmount);
     event PenaltyFundsReleasedToBuddy(uint256 indexed taskId, uint256 indexed rewardAmount, address indexed buddy);
-    event NonceChanged(uint256 indexed nonce);
-    event DepositAdded(address indexed sender, uint256 amount);
-    event DepositWithdrawn(address indexed withdrawAddress, uint256 amount);
+    event BuddyPaymentFailed(uint256 indexed taskId, address indexed buddy, string reason);
+    event DepositAdded(address indexed sender, uint256 indexed amount);
+    event DepositWithdrawn(address indexed withdrawAddress, uint256 indexed amount);
+    event FundsUnlocked(uint256 indexed taskId, uint256 indexed amount, string indexed reason);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -84,23 +93,26 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     error SmartAccount__PayPrefundFailed();
     error SmartAccount__PickAPenalty();
     error SmartAccount__InvalidPenaltyChoice();
+    error SmartAccount__DeadlineToLarge();
     error SmartAccount__NoTaskManagerLinked();
     error SmartAccount__CannotWithdrawCommittedRewards();
     error SmartAccount__TaskNotExpired();
+    error SmartAccount__PaymentNotReleased();
     error SmartAccount__PaymentAlreadyReleased();
     error SmartAccount__TaskAlreadyCompleted();
     error SmartAccount__TaskAlreadyCanceled();
     error SmartAccount__InvalidPenaltyConfig();
     error SmartAccount__RewardCannotBeZero();
-    error SmartAccount__InvalidNonce();
     error SmartAccount__InvalidVerificationMethod();
+    error SmartAccount__InsufficientBalance();
+    error SmartAccount__BuddyPaymentAlreadySent();
 
-    /**
-     * @dev prevents initialization of the implementation
-     */
     /*//////////////////////////////////////////////////////////////
                                 CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @dev prevents initialization of the implementation
+     */
     constructor() {
         _disableInitializers();
     }
@@ -109,26 +121,23 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
                                 MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
-    /**
-     * @dev Allow only EntryPoint to call. EntryPoint has validated the UserOperation using `validateUserOp`.
-     */
     modifier requireFromEntryPoint() {
         if (msg.sender != address(i_entryPoint)) revert SmartAccount__NotFromEntryPoint();
         _;
     }
-
     /**
      * @dev Ensure contract has enough free balance to cover additional task reward.
      * Reverts if caller tries to commit more than available non-committed balance.
      */
+
     modifier contractFundedForTasks(uint256 rewardAmount) {
         if (address(this).balance < s_totalCommittedReward + rewardAmount) revert SmartAccount__AddMoreFunds();
         _;
     }
-
     /**
      * @dev Ensure TaskManager has been linked.
      */
+
     modifier taskManagerLinked() {
         if (address(taskManager) == address(0)) revert SmartAccount__NoTaskManagerLinked();
         _;
@@ -144,7 +153,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     /*//////////////////////////////////////////////////////////////
                                 INITIALIZER
     //////////////////////////////////////////////////////////////*/
-
     /**
      * @notice Initialize the smart account.
      * @param owner Address that will sign UserOperations for this account.
@@ -176,7 +184,8 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         nonReentrant
     {
         // Prevent draining funds reserved for tasks
-        if (value > (address(this).balance - s_totalCommittedReward)) {
+        uint256 availableBalance = address(this).balance - s_totalCommittedReward;
+        if (value > availableBalance) {
             revert SmartAccount__CannotWithdrawCommittedRewards();
         }
 
@@ -206,22 +215,18 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     }
 
     /**
-     * @dev Validate the UserOperation signature.
-     * Uses EIP-712 typed data signing with domain separator per EIP-4337.
-     * @param userOp UserOperation provided by EntryPoint.
-     * @param userOpHash Hash calculated by EntryPoint for this UserOperation.
-     * @notice the entryPoint version used is 0.6
+     * @dev FIXED: Simplified signature validation - nonce handled by EntryPoint
      */
     function _validateSignature(UserOperation calldata userOp, bytes32 userOpHash)
         internal
+        view
         returns (uint256 validationData)
     {
-        // build struct hash: keccak256("UserOperation(bytes32 userOpHash)")
+        // Build struct hash for EIP-712
         bytes32 TYPE_HASH = keccak256("UserOperation(bytes32 userOpHash)");
         bytes32 structHash = keccak256(abi.encode(TYPE_HASH, userOpHash));
 
-        // domain separator per EIP-712:
-        // keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+        // Domain separator per EIP-712
         bytes32 DOMAIN_TYPEHASH =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
         bytes32 nameHash = keccak256(bytes("EntryPoint"));
@@ -232,7 +237,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         // EIP-712 digest
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
 
-        // recover with tryRecover to avoid revert on malformed sig
+        // Recover with tryRecover to avoid revert on malformed sig
         (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, userOp.signature);
         if (err != ECDSA.RecoverError.NoError) {
             // malformed or empty signature -> signature failure
@@ -243,14 +248,13 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
             // signature does not match owner
             return _packValidationData(true, 0, 0);
         }
-
         // signature ok
         return _packValidationData(false, 0, 0);
     }
-
     /**
      * @dev If EntryPoint requests prefund, forward ETH to EntryPoint.
      */
+
     function _payPrefund(uint256 missingAccountFunds) internal {
         if (missingAccountFunds != 0) {
             (bool success,) = payable(address(i_entryPoint)).call{value: missingAccountFunds}("");
@@ -261,7 +265,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     /*//////////////////////////////////////////////////////////////
                               TASK OPERATIONS
     //////////////////////////////////////////////////////////////*/
-
     /**
      * @notice Create a new task for this account.
      * @dev Caller must be EntryPoint. The caller's UserOp must be signed by `s_owner`.
@@ -288,18 +291,17 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         if (choice == PENALTY_DELAYEDPAYMENT && delayDuration == 0) revert SmartAccount__InvalidPenaltyConfig();
         if (rewardAmount == 0) revert SmartAccount__RewardCannotBeZero();
         if (verificationMethod > 2) revert SmartAccount__InvalidVerificationMethod();
+        if (deadlineInSeconds > MAX_DEADLINE_DURATION) revert SmartAccount__DeadlineToLarge();
         uint256 taskId = taskManager.createTask(
             title, description, rewardAmount, deadlineInSeconds, choice, delayDuration, buddy, verificationMethod
         );
 
-        // Reserve reward funds
         s_totalCommittedReward += rewardAmount;
         emit TaskCreated(taskId, description, rewardAmount);
     }
 
     /**
-     * @notice Mark an existing task as completed and unlock the funds from the commited rewards.
-     * @param taskId Task identifier returned by TaskManager when created.
+     * @dev Completion unlocks funds back to available balance
      */
     function completeTask(uint256 taskId) external requireFromEntryPoint taskManagerLinked nonReentrant {
         ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
@@ -311,41 +313,28 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
         if (task.rewardAmount > 0) {
             s_totalCommittedReward -= task.rewardAmount;
+            emit FundsUnlocked(taskId, task.rewardAmount, "Task completed successfully");
         }
 
-        emit TaskCompleted(taskId);
+        emit TaskCompleted(taskId, task.rewardAmount);
     }
-
     /**
      *
      * @notice This is for a future implementation of attestation validation of Partner and AI verification.
      * A offchain verification method will be used for now
      */
+
     function completeTaskWithAttestation(uint256 taskId)
         external
         requireFromEntryPoint
         taskManagerLinked
         nonReentrant
     {
-        // ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
-
-        // if (task.status == ITaskManager.TaskStatus.COMPLETED) revert SmartAccount__TaskAlreadyCompleted();
-        // if (task.status == ITaskManager.TaskStatus.CANCELED) revert SmartAccount__TaskAlreadyCanceled();
-
-        // taskManager.completeTask(taskId);
-
-        // if (task.rewardAmount > 0) {
-        //     s_totalCommittedReward -= task.rewardAmount;
-
-        //     (bool success,) = payable(s_owner).call{value: task.rewardAmount}("");
-        //     if (!success) revert SmartAccount__TaskRewardPaymentFailed();
-        // }
-
-        // emit TaskCompleted(taskId);
+        // Future implementation - currently placeholder
     }
 
     /**
-     * @notice Cancel a task and release the reserved reward back to free balance.
+     * @notice Cancel a task and unlock the funds back to available balance.
      * @param taskId Task identifier.
      */
     function cancelTask(uint256 taskId) external requireFromEntryPoint taskManagerLinked nonReentrant {
@@ -354,13 +343,13 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
         taskManager.cancelTask(taskId);
         s_totalCommittedReward -= task.rewardAmount;
+        emit FundsUnlocked(taskId, task.rewardAmount, "Task canceled");
 
         emit TaskCanceled(taskId);
     }
 
     /**
-     * @notice Release delayed payment after penalty duration elapses.
-     * @param taskId Task identifier.
+     * @notice FIXED: Manual delayed payment release (fallback method)
      */
     function releaseDelayedPayment(uint256 taskId) external requireFromEntryPoint taskManagerLinked nonReentrant {
         ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
@@ -372,8 +361,24 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
 
         taskManager.releaseDelayedPayment(taskId);
         s_totalCommittedReward -= task.rewardAmount;
+        emit FundsUnlocked(taskId, task.rewardAmount, "Delayed payment manually released");
 
         emit DelayedPaymentReleased(taskId, task.rewardAmount);
+    }
+
+    /**
+     * @notice Manual buddy payment release (fallback method)
+     */
+    function releaseBuddyPayment(uint256 taskId) external requireFromEntryPoint taskManagerLinked nonReentrant {
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
+
+        if (task.choice != PENALTY_SENDBUDDY) revert SmartAccount__PenaltyTypeMismatch();
+        if (task.status != ITaskManager.TaskStatus.EXPIRED) revert SmartAccount__TaskNotExpired();
+        if (task.buddyPaymentSent) revert SmartAccount__BuddyPaymentAlreadySent();
+        if (task.buddy == address(0)) revert SmartAccount__InvalidPenaltyConfig();
+
+        // Call TaskManager to handle the release
+        taskManager.releaseBuddyPayment(taskId);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -401,13 +406,16 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         return taskManager.getTaskCountsByStatus(address(this));
     }
 
+    function getAvailableBalance() external view returns (uint256) {
+        return address(this).balance - s_totalCommittedReward;
+    }
+
     /*//////////////////////////////////////////////////////////////
                             EXTERNAL CALLBACKS
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Called by TaskManager when a task expires to apply penalty logic.
-     * @dev Only callable by the configured TaskManager.
+     * @notice FIXED: Better error handling for expired task callbacks
      */
     function expiredTaskCallback(uint256 taskId) external override nonReentrant {
         if (msg.sender != address(taskManager)) revert SmartAccount__OnlyTaskManagerCanCall();
@@ -416,16 +424,24 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         if (task.status != ITaskManager.TaskStatus.EXPIRED) revert SmartAccount__TaskNotExpired();
 
         if (task.choice == PENALTY_DELAYEDPAYMENT) {
-            // Emit when a delayed penalty starts. Actual release requires `releaseDelayedPayment` after the delay.
             emit DurationPenaltyApplied(taskId, task.deadline + task.delayDuration);
         } else if (task.choice == PENALTY_SENDBUDDY) {
             if (task.buddy == address(0)) revert SmartAccount__PickAPenalty();
 
-            s_totalCommittedReward -= task.rewardAmount;
-            (bool success,) = payable(task.buddy).call{value: task.rewardAmount}("");
-            if (!success) revert SmartAccount__TaskRewardPaymentFailed();
+            // Check sufficient balance before transfer
+            if (address(this).balance < task.rewardAmount) revert SmartAccount__InsufficientBalance();
 
-            emit PenaltyFundsReleasedToBuddy(taskId, task.rewardAmount, task.buddy);
+            s_totalCommittedReward -= task.rewardAmount;
+
+            // FIXED: Use gas limit to prevent griefing attacks
+            (bool success,) = payable(task.buddy).call{value: task.rewardAmount, gas: BUDDY_TRANSFER_GAS_LIMIT}("");
+            if (!success) {
+                // If transfer fails, keep funds committed for manual retry
+                s_totalCommittedReward += task.rewardAmount;
+                emit BuddyPaymentFailed(taskId, task.buddy, "Transfer failed");
+            } else {
+                emit PenaltyFundsReleasedToBuddy(taskId, task.rewardAmount, task.buddy);
+            }
         } else {
             revert SmartAccount__InvalidPenaltyChoice();
         }
@@ -433,10 +449,62 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         emit TaskExpired(taskId);
     }
 
+    /**
+     * @notice  logic for automated delayed payment release
+     * @dev unlocks funds locked because of the delayed payment penalty after the delay duration
+     * elapses
+     */
+    function automatedDelayedPaymentRelease(uint256 taskId) external override nonReentrant {
+        if (msg.sender != address(taskManager)) revert SmartAccount__OnlyTaskManagerCanCall();
+
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
+
+        if (task.choice != PENALTY_DELAYEDPAYMENT) revert SmartAccount__PenaltyTypeMismatch();
+        if (task.status != ITaskManager.TaskStatus.EXPIRED) revert SmartAccount__TaskNotExpired();
+        if (block.timestamp < task.deadline + task.delayDuration) revert SmartAccount__PenaltyDurationNotElapsed();
+        if (task.delayedRewardReleased) revert SmartAccount__PaymentAlreadyReleased();
+
+        // Simply unlock the committed funds back to available balance
+        s_totalCommittedReward -= task.rewardAmount;
+        emit FundsUnlocked(taskId, task.rewardAmount, "Delayed payment automatically released");
+
+        emit DelayedPaymentReleased(taskId, task.rewardAmount);
+    }
+
+    /**
+     * @notice NEW: Automated buddy payment attempt for manual releases
+     * @dev Returns success status for TaskManager to track payment state
+     */
+    function automatedBuddyPaymentAttempt(uint256 taskId) external override nonReentrant returns (bool success) {
+        if (msg.sender != address(taskManager)) revert SmartAccount__OnlyTaskManagerCanCall();
+
+        ITaskManager.Task memory task = taskManager.getTask(address(this), taskId);
+
+        if (task.choice != PENALTY_SENDBUDDY) revert SmartAccount__PenaltyTypeMismatch();
+        if (task.status != ITaskManager.TaskStatus.EXPIRED) revert SmartAccount__TaskNotExpired();
+        if (task.buddy == address(0)) revert SmartAccount__InvalidPenaltyConfig();
+
+        // Check sufficient balance before transfer
+        if (address(this).balance < task.rewardAmount) {
+            return false;
+        }
+
+        s_totalCommittedReward -= task.rewardAmount;
+
+        // Attempt transfer with gas limit
+        (success,) = payable(task.buddy).call{value: task.rewardAmount, gas: BUDDY_TRANSFER_GAS_LIMIT}("");
+
+        if (!success) {
+            // If transfer fails, restore committed funds
+            s_totalCommittedReward += task.rewardAmount;
+        }
+
+        return success;
+    }
+
     /*//////////////////////////////////////////////////////////////
                           ENTRYPOINT DEPOSIT HELPERS
     //////////////////////////////////////////////////////////////*/
-
     /**
      * @notice Add ETH deposit for EntryPoint sponsorship.
      * @dev For compatibility with EntryPoint tooling and Paymaster flows.
@@ -445,11 +513,11 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
         i_entryPoint.depositTo{value: msg.value}(address(this));
         emit DepositAdded(msg.sender, msg.value);
     }
-
     /**
      * @notice Withdraw ETH from EntryPoint deposit to `withdrawAddress`.
      * @dev Callable via EntryPoint so owner signs a UserOp authorizing the withdrawal.
      */
+
     function withdrawDepositTo(address payable withdrawAddress, uint256 amount) external requireFromEntryPoint {
         i_entryPoint.withdrawTo(withdrawAddress, amount);
         emit DepositWithdrawn(withdrawAddress, amount);
@@ -458,7 +526,6 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     /*//////////////////////////////////////////////////////////////
                            EIP-1271 SUPPORT
     //////////////////////////////////////////////////////////////*/
-
     /**
      * @notice On-chain signature verification for contracts and off-chain tooling.
      * @dev Supports both EIP-191 (`eth_sign`) and EIP-712 signatures.
@@ -468,23 +535,20 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
      * @return magicValue _EIP1271_MAGICVALUE on success, 0x0 on failure.
      */
     function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4) {
-        // Try EIP-191 (`eth_sign`) prefix
         if (ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(hash), signature) == s_owner) {
             return _EIP1271_MAGICVALUE;
         }
-        // Try EIP-712 (assume `hash` is already typed-data digest)
         if (ECDSA.recover(hash, signature) == s_owner) {
             return _EIP1271_MAGICVALUE;
         }
-        return bytes4(0); // invalid
+        return bytes4(0);
     }
-
     /**
      * @notice Interface support declaration.
      */
-function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
-    return interfaceId == type(ISmartAccount).interfaceId
-        || interfaceId == type(IAccount).interfaceId
-        || interfaceId == type(IERC165).interfaceId;
-}
+
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+        return interfaceId == type(ISmartAccount).interfaceId || interfaceId == type(IAccount).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
+    }
 }
