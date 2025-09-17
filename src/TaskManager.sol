@@ -25,7 +25,6 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     /*//////////////////////////////////////////////////////////////
                                  CONSTANTS
     //////////////////////////////////////////////////////////////*/
-    
 
     // Gas limit for buddy transfers to prevent griefing
     uint256 private constant BUDDY_TRANSFER_GAS_LIMIT = 50000;
@@ -64,15 +63,21 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event TaskCreated(address indexed account, uint256 indexed taskId, string description, uint256 indexed rewardAmount);
+    event TaskCreated(
+        address indexed account, uint256 indexed taskId, string description, uint256 indexed rewardAmount
+    );
     event TaskCompleted(address indexed account, uint256 indexed taskId);
     event TaskCanceled(address indexed account, uint256 indexed taskId);
     event TaskExpired(address indexed account, uint256 indexed taskId);
     event TaskExpiredCallFailure(address indexed account, uint256 indexed taskId, string reason);
     event TaskDelayedPaymentReleased(address indexed account, uint256 indexed taskId, uint256 indexed rewardAmount);
-    event TaskBuddyPaymentSent(address indexed account, uint256 indexed taskId, uint256 indexed rewardAmount, address buddy);
+    event TaskBuddyPaymentSent(
+        address indexed account, uint256 indexed taskId, uint256 indexed rewardAmount, address buddy
+    );
     event TaskBuddyPaymentFailed(address indexed account, uint256 indexed taskId, address indexed buddy, string reason);
-    event DelayedPaymentAutomationScheduled(address indexed account, uint256 indexed taskId, uint256 indexed releaseTimestamp);
+    event DelayedPaymentAutomationScheduled(
+        address indexed account, uint256 indexed taskId, uint256 indexed releaseTimestamp
+    );
 
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -98,6 +103,17 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     constructor() {}
 
     /*//////////////////////////////////////////////////////////////
+                              MODIFIER
+    //////////////////////////////////////////////////////////////*/
+
+    modifier taskExist(address account, uint256 taskId) {
+        if (taskId >= s_taskCounters[account]) {
+            revert TaskManager__TaskDoesntExist();
+        }
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                HEAP HELPERS
     //////////////////////////////////////////////////////////////*/
 
@@ -106,26 +122,46 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
     }
 
     // Generic heap operations that work with both heaps
-    function _heapPush(HeapItem[] storage heap, mapping(bytes32 => uint256) storage heapIndex, HeapItem memory item) internal {
+    function _heapPush(HeapItem[] storage heap, mapping(bytes32 => uint256) storage heapIndex, HeapItem memory item)
+        internal
+    {
         heap.push(item);
         uint256 idx = heap.length - 1;
         heapIndex[_heapKey(item.account, item.taskId)] = idx + 1;
         _siftUp(heap, heapIndex, idx);
     }
 
-    function _heapRemove(HeapItem[] storage heap, mapping(bytes32 => uint256) storage heapIndex, address account, uint256 taskId) internal {
+    function _heapRemove(
+        HeapItem[] storage heap,
+        mapping(bytes32 => uint256) storage heapIndex,
+        address account,
+        uint256 taskId
+    ) internal {
         if (heap.length == 0) return;
         bytes32 key = _heapKey(account, taskId);
         uint256 idxPlusOne = heapIndex[key];
         if (idxPlusOne == 0) return;
-        
+
         uint256 idx = idxPlusOne - 1;
-        
-        // FIXED: Validate the item matches before removing
-        if (heap[idx].account != account || heap[idx].taskId != taskId) {
-            return; // Item doesn't match, skip removal
+
+        // Check if index is stale and find correct position if needed
+        if (idx >= heap.length || heap[idx].account != account || heap[idx].taskId != taskId) {
+            // Index is stale, find the correct position
+            bool found = false;
+            for (uint256 i = 0; i < heap.length; i++) {
+                if (heap[i].account == account && heap[i].taskId == taskId) {
+                    idx = i;
+                    found = true;
+                    break;
+                }
+            }
+            // If not found after scan, clean up and return
+            if (!found) {
+                delete heapIndex[key];
+                return;
+            }
         }
-        
+
         uint256 last = heap.length - 1;
 
         if (idx != last) {
@@ -142,7 +178,9 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         }
     }
 
-    function _heapSwap(HeapItem[] storage heap, mapping(bytes32 => uint256) storage heapIndex, uint256 i, uint256 j) internal {
+    function _heapSwap(HeapItem[] storage heap, mapping(bytes32 => uint256) storage heapIndex, uint256 i, uint256 j)
+        internal
+    {
         HeapItem memory a = heap[i];
         HeapItem memory b = heap[j];
         heap[i] = b;
@@ -224,9 +262,9 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         uint8 verificationMethod
     ) external override nonReentrant returns (uint256) {
         address account = msg.sender;
-        
+
         uint256 deadline = block.timestamp + deadlineInSeconds;
-        
+
         uint256 newTaskId = s_taskCounters[account];
 
         s_tasks[account][newTaskId] = Task({
@@ -246,10 +284,11 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         });
 
         _pushTaskToStatus(account, uint8(TaskStatus.ACTIVE), newTaskId);
-        
+
         // Add to expiration heap
-        _heapPush(s_expirationHeap, s_expirationHeapIndex, 
-                 HeapItem({account: account, taskId: newTaskId, deadline: deadline}));
+        _heapPush(
+            s_expirationHeap, s_expirationHeapIndex, HeapItem({account: account, taskId: newTaskId, deadline: deadline})
+        );
 
         emit TaskCreated(account, newTaskId, description, rewardAmount);
 
@@ -336,17 +375,20 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         _heapRemove(s_expirationHeap, s_expirationHeapIndex, account, taskId);
 
         // For delayed payment penalties, schedule automated release
-        if (task.choice == 1) { // PENALTY_DELAYEDPAYMENT
+        if (task.choice == 1) {
+            // PENALTY_DELAYEDPAYMENT
             uint256 releaseTimestamp = task.deadline + task.delayDuration;
-            _heapPush(s_delayedPaymentHeap, s_delayedPaymentHeapIndex,
-                     HeapItem({account: account, taskId: taskId, deadline: releaseTimestamp}));
-            
+            _heapPush(
+                s_delayedPaymentHeap,
+                s_delayedPaymentHeapIndex,
+                HeapItem({account: account, taskId: taskId, deadline: releaseTimestamp})
+            );
+
             emit DelayedPaymentAutomationScheduled(account, taskId, releaseTimestamp);
         }
 
         emit TaskExpired(account, taskId);
 
-        // FIXED: Better error handling for external calls
         try ISmartAccount(account).expiredTaskCallback(taskId) {
             // success
         } catch Error(string memory reason) {
@@ -385,7 +427,6 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
                          MANUAL RELEASE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    // Keep manual delayed payment release as fallback
     function releaseDelayedPayment(uint256 taskId) external override nonReentrant taskExist(msg.sender, taskId) {
         address account = msg.sender;
         Task storage task = s_tasks[account][taskId];
@@ -396,14 +437,12 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         if (block.timestamp < task.deadline + task.delayDuration) revert TaskManager__TaskNotYetExpired();
 
         task.delayedRewardReleased = true;
-        
+
         // Remove from automation heap if present
         _heapRemove(s_delayedPaymentHeap, s_delayedPaymentHeapIndex, account, taskId);
-        
         emit TaskDelayedPaymentReleased(account, taskId, task.rewardAmount);
     }
 
-    // NEW: Manual buddy payment release
     function releaseBuddyPayment(uint256 taskId) external override nonReentrant taskExist(msg.sender, taskId) {
         address account = msg.sender;
         Task storage task = s_tasks[account][taskId];
@@ -412,40 +451,29 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
         if (task.choice != 2) revert TaskManager__InvalidPenaltyType();
         if (task.buddyPaymentSent) revert TaskManager__BuddyPaymentAlreadySent();
         if (task.buddy == address(0)) revert TaskManager__InvalidPenaltyConfig();
-
-        // Update state first
-        task.buddyPaymentSent = true;
-
-        // Attempt to send payment to buddy via SmartAccount
-        try ISmartAccount(account).automatedBuddyPaymentAttempt(taskId) returns (bool success) {
-            if (success) {
-                emit TaskBuddyPaymentSent(account, taskId, task.rewardAmount, task.buddy);
-            } else {
-                // Reset flag if payment failed
-                task.buddyPaymentSent = false;
-                emit TaskBuddyPaymentFailed(account, taskId, task.buddy, "Payment attempt failed");
-            }
+        address buddy = task.buddy;
+        uint256 rewardAmount = task.rewardAmount;
+        bool success;
+        try ISmartAccount(account).automatedBuddyPaymentAttempt(taskId) returns (bool _success) {
+            success = _success;
         } catch Error(string memory reason) {
-            // Reset flag if call failed
-            task.buddyPaymentSent = false;
-            emit TaskBuddyPaymentFailed(account, taskId, task.buddy, reason);
+            emit TaskBuddyPaymentFailed(account, taskId, buddy, reason);
+            return;
         } catch (bytes memory) {
-            // Reset flag if call failed
-            task.buddyPaymentSent = false;
-            emit TaskBuddyPaymentFailed(account, taskId, task.buddy, "Low-level call failed");
+            emit TaskBuddyPaymentFailed(account, taskId, buddy, "Low-level call failed");
+            return;
+        }
+        if (success) {
+            task.buddyPaymentSent = true;
+            emit TaskBuddyPaymentSent(account, taskId, rewardAmount, buddy);
+        } else {
+            emit TaskBuddyPaymentFailed(account, taskId, buddy, "Payment attempt failed");
         }
     }
 
     /*//////////////////////////////////////////////////////////////
                             EXISTING GETTERS
     //////////////////////////////////////////////////////////////*/
-
-    modifier taskExist(address account, uint256 taskId) {
-        if (taskId >= s_taskCounters[account]) {
-            revert TaskManager__TaskDoesntExist();
-        }
-        _;
-    }
 
     function getTasksByStatus(address account, TaskStatus status, uint256 start, uint256 limit)
         external
@@ -493,7 +521,6 @@ contract TaskManager is ITaskManager, AutomationCompatibleInterface, ReentrancyG
 
     function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
         return interfaceId == type(ITaskManager).interfaceId
-            || interfaceId == type(AutomationCompatibleInterface).interfaceId 
-            || interfaceId == type(IERC165).interfaceId;
+            || interfaceId == type(AutomationCompatibleInterface).interfaceId || interfaceId == type(IERC165).interfaceId;
     }
 }

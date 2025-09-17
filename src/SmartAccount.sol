@@ -48,7 +48,7 @@ contract SmartAccount is Initializable, IAccount, ISmartAccount, ReentrancyGuard
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Gas limit for buddy transfers to prevent griefing attacks
-    uint256 private constant BUDDY_TRANSFER_GAS_LIMIT = 50000;
+    uint256 private constant BUDDY_TRANSFER_GAS_LIMIT = 100000;
 
     /// @notice Penalty type: delayed payment.
     uint8 public constant PENALTY_DELAYEDPAYMENT = 1;
