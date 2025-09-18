@@ -60,15 +60,14 @@ contract HelperConfig is Script {
     }
 
     function getSepoliaEthConfig() public pure returns (NetworkConfig memory) {
-        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: BURNER_WALLET,taskManager:0xbf35E4fa1603C52FdDCF3331d0D384334e5F5ac4});
+        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: BURNER_WALLET,taskManager:0xb9F0c4E18838A1F37Cc62b8cd7B558ca8eB7B1Dc});
     }
 
     function getBaseSepoliaEthConfig() public pure returns (NetworkConfig memory) {
-        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: SEPOLIA_WALLET,taskManager:0xbf35E4fa1603C52FdDCF3331d0D384334e5F5ac4});
+        return NetworkConfig({entryPoint: 0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789, account: SEPOLIA_WALLET,taskManager:0xb9F0c4E18838A1F37Cc62b8cd7B558ca8eB7B1Dc});
     }
 
     function getAnvilEthConfig() public returns (NetworkConfig memory) {
-        // Return existing config if already deployed
         if (localNetwork.entryPoint != address(0)) {
             return localNetwork;
         }
